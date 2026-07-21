@@ -49,11 +49,17 @@ def load_model_once():
 
     if DEVICE == 'cuda':
         load_kwargs['device_map'] = 'auto'
-        # Enable flash-attention 2 if available (much faster on GPU)
+        # Auto-detect best attention backend:
+        #   flash_attention_2 → fastest, requires the flash-attn package
+        #   sdpa              → PyTorch built-in (2.0+), no extra install needed
+        #   eager             → always available, slowest
         try:
+            import flash_attn  # noqa: F401
             load_kwargs['attn_implementation'] = 'flash_attention_2'
-        except Exception:
-            pass
+            print("[الدكتور الذكي] ✅ FlashAttention2 متوفرة — تم تفعيلها.")
+        except ImportError:
+            load_kwargs['attn_implementation'] = 'sdpa'
+            print("[الدكتور الذكي] ℹ️ FlashAttention2 غير متوفرة — استخدام SDPA.")
     else:
         load_kwargs['device_map'] = 'cpu'
 
