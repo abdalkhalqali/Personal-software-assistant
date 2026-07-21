@@ -17,7 +17,6 @@ from transformers import AutoProcessor, AutoModelForImageTextToText, TextIterato
 
 def _get_args():
     parser = ArgumentParser()
-    # ✅ استخدام أصغر نموذج متاح
     parser.add_argument('-c', '--checkpoint-path', type=str, default='Qwen/Qwen2-VL-2B-Instruct', help='Checkpoint name or path')
     parser.add_argument('--cpu-only', action='store_true', help='Run demo with CPU only')
     parser.add_argument('--flash-attn2', action='store_true', default=False, help='Enable flash_attention_2')
@@ -38,7 +37,6 @@ def _load_model_processor(args):
     else:
         device_map = 'auto'
     
-    # ✅ استخدام float16 لتوفير الذاكرة
     if args.flash_attn2:
         model = AutoModelForImageTextToText.from_pretrained(
             args.checkpoint_path,
@@ -139,8 +137,7 @@ def _launch_demo(args, model, processor, backend):
         tokenizer = processor.tokenizer
         streamer = TextIteratorStreamer(tokenizer, timeout=20.0, skip_prompt=True, skip_special_tokens=True)
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        # ✅ ردود قصيرة لتوفير الوقت
-        gen_kwargs = {'max_new_tokens': 128, 'streamer': streamer, **inputs}
+        gen_kwargs = {'max_new_tokens': 256, 'streamer': streamer, **inputs}
         thread = Thread(target=model.generate, kwargs=gen_kwargs)
         thread.start()
         generated_text = ''
@@ -258,7 +255,7 @@ def _launch_demo(args, model, processor, backend):
         """)
         gr.Markdown("""<center><font size=8>Qwen3-VL العربي</font></center>""")
         gr.Markdown("""<center><font size=4>مساعد ذكاء اصطناعي عربي متعدد الوسائط</font></center>""")
-        gr.Markdown(f"""<center><font size=3>Backend: Hugging Face Transformers | النموذج: Qwen2-VL-2B</font></center>""")
+        gr.Markdown(f"""<center><font size=3>🚀 يعمل على GPU | النموذج: Qwen2-VL-2B</font></center>""")
 
         chatbot = gr.Chatbot(label='المساعد العربي', elem_classes='control-height', height=500)
         query = gr.Textbox(lines=2, label='أدخل نصك هنا', placeholder='اكتب سؤالك بالعربية...')
@@ -303,7 +300,7 @@ def _launch_demo(args, model, processor, backend):
     )
 
 
-@spaces.GPU(duration=60)
+@spaces.GPU(duration=120)
 def main():
     args = _get_args()
     model, processor, backend = _load_model_processor(args)
