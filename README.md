@@ -1,20 +1,32 @@
 ---
-title: Qwen3-VL-Demo
-emoji: 🚀
+title: الدكتور الذكي - Qwen3-VL Demo
+emoji: 🎓
 colorFrom: blue
-colorTo: purple
+colorTo: indigo
 sdk: gradio
-sdk_version: 6.20.0
+sdk_version: 5.33.0
 app_file: web_demo_mm.py
 pinned: false
 ---
 
-# Qwen3-VL Multimodal Demo
+# 🎓 الدكتور الذكي — Smart Doctor
 
-This Space hosts the Qwen3-VL-2B-Instruct model using Gradio 6.20.0. 
+أستاذك الجامعي الذكي المدعوم بـ Qwen3-VL-2B-Instruct
+
+## القدرات
+- تحليل الصور والمخططات العلمية
+- قراءة رموز QR واستخراج محتواها
+- استخراج النصوص من الصور والمستندات
+- شرح المفاهيم الأكاديمية بأسلوب واضح
+- يتحدث العربية والإنجليزية
+
+## الاستخدام
+1. اكتب سؤالك في مربع النص
+2. أو ارفع صورة/رمز QR ثم اكتب سؤالك عنها
+3. اضغط Enter أو زر الإرسال
 
 ## Local Setup
 ```bash
-pip install -r requirements_web_demo.txt
-python web_demo_mm.py --checkpoint-path Qwen/Qwen3-VL-2B-Instruct --backend hf
+pip install -r requirements.txt
+python web_demo_mm.py
 ```

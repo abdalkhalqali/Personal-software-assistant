@@ -1,8 +1,8 @@
-transformers
-git+https://github.com/huggingface/transformers.git
 accelerate
 torch
 torchvision
 qwen-vl-utils
 av
 pillow
+spaces
+transformers>=4.51.0
