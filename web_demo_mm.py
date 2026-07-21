@@ -1,4 +1,4 @@
-# web_demo_mm.py - نسخة سريعة مع Flash Attention
+# web_demo_mm.py - نسخة ZeroGPU معدلة
 
 import spaces
 import gradio as gr
@@ -6,12 +6,11 @@ import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
 
-@spaces.GPU
+# تحميل النموذج بدون @spaces.GPU
 def load_model():
     model = AutoModelForImageTextToText.from_pretrained(
         "Qwen/Qwen2-VL-2B-Instruct",
         torch_dtype=torch.float16,
-        attn_implementation="flash_attention_2",  # ⚡ تسريع
         device_map="auto",
         low_cpu_mem_usage=True
     )
@@ -19,9 +18,11 @@ def load_model():
     return model, processor
 
 
+# تحميل النموذج مباشرة (ليس داخل دالة مزينة بـ @spaces.GPU)
 model, processor = load_model()
 
 
+# دالة الرد - هذه فقط تعمل على GPU
 @spaces.GPU
 def respond(message, history):
     messages = [{"role": "user", "content": [{"type": "text", "text": message}]}]
@@ -34,14 +35,11 @@ def respond(message, history):
     )
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
     
-    # ⚡ إعدادات سريعة
     outputs = model.generate(
         **inputs,
-        max_new_tokens=64,
-        do_sample=False,
-        temperature=0.1,
-        num_beams=1,
-        use_cache=True
+        max_new_tokens=128,
+        do_sample=True,
+        temperature=0.7
     )
     
     response = processor.decode(outputs[0], skip_special_tokens=True)
@@ -50,12 +48,13 @@ def respond(message, history):
     return response
 
 
+# إنشاء الواجهة
 def main():
     gr.ChatInterface(
         fn=respond,
-        title="🤖 Qwen3-VL العربي (سريع)",
-        description="مساعد ذكاء اصطناعي عربي - مع Flash Attention",
-        examples=["مرحباً", "من أنت؟", "كيف الحال؟"]
+        title="🤖 Qwen3-VL العربي",
+        description="مساعد ذكاء اصطناعي عربي متعدد الوسائط (ZeroGPU)",
+        examples=["مرحباً، من أنت؟", "ما هي قدراتك؟", "كيف يمكنك مساعدتي؟"]
     ).launch()
 
 
