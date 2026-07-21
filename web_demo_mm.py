@@ -1,6 +1,11 @@
 """
 Personal AI Coding Agent — Qwen3-VL
 مساعد البرمجة الشخصي الذكي
+
+وضع التشغيل (محدد تلقائياً):
+  1. HF Inference API  → يستخدم HF_TOKEN، بدون ZeroGPU، مجاني بلا حدود يومية
+  2. GPU محلي          → إن توفّر (ZeroGPU أو GPU حقيقي)
+  3. CPU محلي          → الاحتياط الأخير، بطيء لكن مجاني دائماً
 """
 import os
 import re
@@ -16,17 +21,15 @@ from threading import Thread
 from transformers import AutoProcessor, AutoModelForImageTextToText, TextIteratorStreamer
 from qwen_vl_utils import process_vision_info
 
-# ── ZeroGPU ────────────────────────────────────────────────────────────────
-try:
-    import spaces
-    HAS_SPACES = True
-except ImportError:
-    HAS_SPACES = False
-
 # ── Config ─────────────────────────────────────────────────────────────────
 CHECKPOINT     = os.environ.get('MODEL_CHECKPOINT', 'Qwen/Qwen3-VL-2B-Instruct')
 DEVICE         = 'cuda' if torch.cuda.is_available() else 'cpu'
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', '3072'))
+HF_TOKEN       = os.environ.get('HF_TOKEN', '')
+
+# استخدام HF Inference API افتراضياً (لا يستهلك ZeroGPU)
+# اضبط USE_API=0 في متغيرات البيئة للإجبار على التشغيل المحلي
+USE_API = os.environ.get('USE_API', '1') == '1' and bool(HF_TOKEN)
 IMAGE_EXTS     = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.avif')
 VIDEO_EXTS     = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v')
 
@@ -136,16 +139,17 @@ def parse_github_url(url: str) -> tuple[str, str]:
     raise ValueError(f"تعذّر استخراج معلومات المستودع من: {url}")
 
 
-# ── Model ──────────────────────────────────────────────────────────────────
+# ── Model (local — CPU/GPU fallback) ───────────────────────────────────────
 model = None
 processor = None
 
 
 def load_model_once():
+    """تحميل النموذج محلياً (CPU أو GPU). يُستدعى فقط إن فشل الـ API."""
     global model, processor
     if model is not None:
         return
-    print(f"[Agent] تحميل النموذج {CHECKPOINT} على {DEVICE}…")
+    print(f"[Agent] تحميل النموذج محلياً على {DEVICE}…")
     processor = AutoProcessor.from_pretrained(CHECKPOINT, trust_remote_code=True)
 
     dtype = torch.bfloat16 if DEVICE == "cuda" else torch.float32
@@ -156,25 +160,107 @@ def load_model_once():
         try:
             import flash_attn  # noqa: F401
             load_kwargs["attn_implementation"] = "flash_attention_2"
-            print("[Agent] ✅ FlashAttention2 — مُفعَّلة")
+            print("[Agent] ✅ FlashAttention2 مُفعَّلة")
         except ImportError:
             load_kwargs["attn_implementation"] = "sdpa"
-            print("[Agent] ℹ️ SDPA — مُفعَّل (FlashAttention2 غير متوفرة)")
+            print("[Agent] ℹ️ SDPA مُفعَّل")
     else:
         load_kwargs["device_map"] = "cpu"
 
     model = AutoModelForImageTextToText.from_pretrained(CHECKPOINT, **load_kwargs)
     model.eval()
-    print("[Agent] ✅ النموذج جاهز")
+    print("[Agent] ✅ النموذج المحلي جاهز")
 
 
-# ── Inference ──────────────────────────────────────────────────────────────
+# ── HF Inference API helpers ────────────────────────────────────────────────
 
-def _predict(chatbot, history):
+MIME = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+    "gif": "image/gif",  "webp": "image/webp", "bmp": "image/bmp",
+    "tiff": "image/tiff","tif": "image/tiff",  "avif": "image/avif",
+}
+
+
+def _img_to_data_url(path: str) -> str | None:
+    """اقرأ صورة من المسار وحوّلها إلى data-URL لإرسالها عبر API."""
+    try:
+        ext = path.rsplit(".", 1)[-1].lower()
+        mime = MIME.get(ext, "image/jpeg")
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+
+def _history_to_api(history: list) -> list:
+    """
+    حوّل تاريخ المحادثة من صيغة Qwen المحلية إلى صيغة OpenAI-chat المتوافقة مع HF API.
+    الصور المحلية تُحوَّل إلى data-URL (base64).
+    """
+    api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in (history or []):
+        role    = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            api_msgs.append({"role": role, "content": content})
+            continue
+
+        # محتوى متعدد الوسائط (قائمة)
+        parts = []
+        for item in content:
+            t = item.get("type", "")
+            if t == "text":
+                parts.append({"type": "text", "text": item.get("text", "")})
+            elif t == "image":
+                path = item.get("image", "")
+                url  = _img_to_data_url(path) if path else None
+                if url:
+                    parts.append({"type": "image_url", "image_url": {"url": url}})
+                else:
+                    parts.append({"type": "text", "text": f"[صورة: {path}]"})
+            elif t == "video":
+                parts.append({"type": "text",
+                               "text": "[فيديو مرفق — التحليل البصري للفيديو غير مدعوم عبر API]"})
+        if parts:
+            api_msgs.append({"role": role, "content": parts})
+
+    return api_msgs
+
+
+def _predict_api(chatbot, history):
+    """استدلال عبر HF Inference API — لا يستهلك ZeroGPU."""
+    from huggingface_hub import InferenceClient
+
+    client   = InferenceClient(model=CHECKPOINT, token=HF_TOKEN)
+    api_msgs = _history_to_api(history)
+
+    reply   = ""
+    chatbot = list(chatbot or []) + [{"role": "assistant", "content": "⏳ جاري التفكير…"}]
+    history = list(history or []) + [{"role": "assistant", "content": ""}]
+
+    try:
+        stream = client.chat_completion(
+            messages=api_msgs,
+            max_tokens=MAX_NEW_TOKENS,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            reply += delta
+            chatbot[-1] = {"role": "assistant", "content": reply}
+            history[-1] = {"role": "assistant", "content": reply}
+            yield chatbot, history
+    except Exception as e:
+        raise RuntimeError(str(e))
+
+
+def _predict_local(chatbot, history):
+    """استدلال محلي (CPU/GPU) — احتياطي إذا فشل API."""
     load_model_once()
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(history or [])
-
     try:
         text = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -188,25 +274,22 @@ def _predict(chatbot, history):
             return_tensors="pt",
         ).to(model.device if hasattr(model, "device") else DEVICE)
     except Exception:
-        err = f"⚠️ خطأ في معالجة الإدخال:\n```\n{traceback.format_exc()}\n```"
+        err = f"⚠️ خطأ في المعالجة:\n```\n{traceback.format_exc()}\n```"
         yield list(chatbot or []) + [{"role": "assistant", "content": err}], history
         return
 
     streamer = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
     gen_kwargs = dict(
-        **inputs,
-        streamer=streamer,
+        **inputs, streamer=streamer,
         max_new_tokens=MAX_NEW_TOKENS,
-        do_sample=False,
-        temperature=None,
-        top_p=None,
+        do_sample=False, temperature=None, top_p=None,
         repetition_penalty=1.05,
     )
     Thread(target=model.generate, kwargs=gen_kwargs, daemon=True).start()
 
-    reply = ""
-    chatbot  = list(chatbot  or []) + [{"role": "assistant", "content": ""}]
-    history  = list(history  or []) + [{"role": "assistant", "content": ""}]
+    reply   = ""
+    chatbot = list(chatbot or []) + [{"role": "assistant", "content": "⏳ (وضع CPU — قد يأخذ لحظات)…"}]
+    history = list(history or []) + [{"role": "assistant", "content": ""}]
 
     try:
         for chunk in streamer:
@@ -219,12 +302,23 @@ def _predict(chatbot, history):
         yield chatbot, history
 
 
-if HAS_SPACES:
-    @spaces.GPU
-    def predict(chatbot, history):
-        yield from _predict(chatbot, history)
-else:
-    predict = _predict
+def predict(chatbot, history):
+    """
+    المدخل الرئيسي للاستدلال.
+    الأولوية: HF Inference API  ←  GPU محلي  ←  CPU محلي
+    لا يوجد @spaces.GPU — لا استهلاك لحصة ZeroGPU.
+    """
+    if USE_API:
+        try:
+            yield from _predict_api(chatbot, history)
+            return
+        except Exception as e:
+            print(f"[Agent] API فشل ({e})، تحويل إلى التشغيل المحلي…")
+            # أضف رسالة تنبيه مضمّنة ثم أكمل محلياً
+            chatbot = list(chatbot or [])
+            if chatbot and chatbot[-1].get("role") == "assistant":
+                chatbot[-1]["content"] = f"⚠️ API غير متاح، أستخدم {DEVICE} محلياً…\n\n"
+    yield from _predict_local(chatbot, history)
 
 
 # ── Message helpers ─────────────────────────────────────────────────────────
