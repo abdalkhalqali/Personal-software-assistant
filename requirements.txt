@@ -1,10 +1,8 @@
 torch
 torchvision
-torchaudio
-transformers>=4.40.0
 accelerate
+transformers
+git+https://github.com/huggingface/transformers.git
+qwen-vl-utils
+av
 pillow
-sentencepiece
-safetensors
-gradio
-spaces
