@@ -22,13 +22,17 @@ def _load_model_processor():
 def add_text(chatbot, history, text):
     if not text: return chatbot, history, ""
     msg = {'role': 'user', 'content': text}
-    return (chatbot or []) + [msg], (history or []) + [msg], ""
+    chatbot = (chatbot or []) + [msg]
+    history = (history or []) + [msg]
+    return chatbot, history, ""
 
 def add_file(chatbot, history, file):
     if file is None: return chatbot, history
     mime = 'image' if file.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) else 'video'
     msg = {'role': 'user', 'content': [{'type': mime, mime: file.name}]}
-    return (chatbot or []) + [msg], (history or []) + [msg]
+    chatbot = (chatbot or []) + [msg]
+    history = (history or []) + [msg]
+    return chatbot, history
 
 def predict(chatbot, history):
     global model, processor
@@ -53,8 +57,8 @@ def predict(chatbot, history):
         yield chatbot
 
 with gr.Blocks() as demo:
-    gr.Markdown("# Qwen3-VL Optimized Demo")
-    chatbot = gr.Chatbot(label='Assistant', height=600) # Fixed: No type='messages'
+    gr.Markdown("# Qwen3-VL Fixed Production Demo")
+    chatbot = gr.Chatbot(label='Assistant', height=600)
     with gr.Row():
         query = gr.Textbox(show_label=False, placeholder='Type message...', scale=4)
         addfile_btn = gr.UploadButton('📁', file_types=['image', 'video'])
