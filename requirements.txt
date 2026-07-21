@@ -1,10 +1,11 @@
-# Core dependencies
-transformers-stream-generator==0.0.5
-git+https://github.com/huggingface/transformers.git@7aa888b7fa477d13153ffbfe107dfbd6c696014a
 torch
 torchvision
+torchaudio
+transformers>=4.40.0
 accelerate
-
-# Optional dependency
-# Uncomment the following line if you need flash-attn
-# flash-attn
+qwen-vl-utils
+pillow
+sentencepiece
+safetensors
+gradio
+spaces
