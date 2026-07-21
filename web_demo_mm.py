@@ -32,18 +32,16 @@ def add_file(chatbot, history, file):
 
 def predict(chatbot, history):
     global model, processor
-    if model is None:
-        model, processor = _load_model_processor()
+    if model is None: model, processor = _load_model_processor()
     
-    # Prepare inputs
     text = processor.apply_chat_template(history, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(history)
     inputs = processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors='pt').to(model.device)
     
     streamer = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
-    generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=1024)
+    gen_kwargs = dict(inputs, streamer=streamer, max_new_tokens=1024)
     
-    thread = Thread(target=model.generate, kwargs=generation_kwargs)
+    thread = Thread(target=model.generate, kwargs=gen_kwargs)
     thread.start()
 
     chatbot.append({'role': 'assistant', 'content': ''})
@@ -56,9 +54,9 @@ def predict(chatbot, history):
 
 with gr.Blocks() as demo:
     gr.Markdown("# Qwen3-VL Optimized Demo")
-    chatbot = gr.Chatbot(label='Assistant', height=600)
+    chatbot = gr.Chatbot(label='Assistant', height=600) # Fixed: No type='messages'
     with gr.Row():
-        query = gr.Textbox(show_label=False, placeholder='Type message and press Enter...', scale=4)
+        query = gr.Textbox(show_label=False, placeholder='Type message...', scale=4)
         addfile_btn = gr.UploadButton('📁', file_types=['image', 'video'])
     
     task_history = gr.State([])
