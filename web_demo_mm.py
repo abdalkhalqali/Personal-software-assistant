@@ -1,4 +1,4 @@
-# web_demo_mm.py - نسخة ZeroGPU
+# web_demo_mm.py - نسخة ZeroGPU معدلة
 
 import spaces
 import gradio as gr
@@ -6,9 +6,8 @@ import torch
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
 
-@spaces.GPU
+# تحميل النموذج بدون @spaces.GPU
 def load_model():
-    """تحميل النموذج على GPU"""
     model = AutoModelForImageTextToText.from_pretrained(
         "Qwen/Qwen2-VL-2B-Instruct",
         torch_dtype=torch.float16,
@@ -19,13 +18,13 @@ def load_model():
     return model, processor
 
 
-# تحميل النموذج مرة واحدة عند بدء التشغيل
+# تحميل النموذج مباشرة (ليس داخل دالة مزينة بـ @spaces.GPU)
 model, processor = load_model()
 
 
+# دالة الرد - هذه فقط تعمل على GPU
 @spaces.GPU
 def respond(message, history):
-    """دالة الرد - تعمل على GPU"""
     messages = [{"role": "user", "content": [{"type": "text", "text": message}]}]
     
     inputs = processor.apply_chat_template(
