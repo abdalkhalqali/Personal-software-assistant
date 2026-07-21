@@ -2,6 +2,8 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import spaces
+
 import os
 import copy
 import re
@@ -15,9 +17,9 @@ from transformers import AutoProcessor, AutoModelForImageTextToText, TextIterato
 
 def _get_args():
     parser = ArgumentParser()
-    # ✅ استخدام أصغر نموذج على CPU
+    # ✅ استخدام أصغر نموذج متاح
     parser.add_argument('-c', '--checkpoint-path', type=str, default='Qwen/Qwen2-VL-2B-Instruct', help='Checkpoint name or path')
-    parser.add_argument('--cpu-only', action='store_true', default=True, help='Run demo with CPU only')
+    parser.add_argument('--cpu-only', action='store_true', help='Run demo with CPU only')
     parser.add_argument('--flash-attn2', action='store_true', default=False, help='Enable flash_attention_2')
     parser.add_argument('--share', action='store_true', default=False, help='Create a publicly shareable link')
     parser.add_argument('--inbrowser', action='store_true', default=False, help='Launch in browser')
@@ -31,15 +33,27 @@ def _get_args():
 
 
 def _load_model_processor(args):
-    # ✅ استخدام CPU دائماً
-    device_map = 'cpu'
+    if args.cpu_only:
+        device_map = 'cpu'
+    else:
+        device_map = 'auto'
     
-    model = AutoModelForImageTextToText.from_pretrained(
-        args.checkpoint_path,
-        torch_dtype=torch.float32,
-        device_map=device_map,
-        low_cpu_mem_usage=True
-    )
+    # ✅ استخدام float16 لتوفير الذاكرة
+    if args.flash_attn2:
+        model = AutoModelForImageTextToText.from_pretrained(
+            args.checkpoint_path,
+            torch_dtype=torch.float16,
+            attn_implementation='flash_attention_2',
+            device_map=device_map,
+            low_cpu_mem_usage=True
+        )
+    else:
+        model = AutoModelForImageTextToText.from_pretrained(
+            args.checkpoint_path,
+            torch_dtype=torch.float16,
+            device_map=device_map,
+            low_cpu_mem_usage=True
+        )
     processor = AutoProcessor.from_pretrained(args.checkpoint_path)
     return model, processor, 'hf'
 
@@ -125,8 +139,8 @@ def _launch_demo(args, model, processor, backend):
         tokenizer = processor.tokenizer
         streamer = TextIteratorStreamer(tokenizer, timeout=20.0, skip_prompt=True, skip_special_tokens=True)
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        # ✅ ردود قصيرة جداً لتوفير الوقت
-        gen_kwargs = {'max_new_tokens': 64, 'streamer': streamer, **inputs}
+        # ✅ ردود قصيرة لتوفير الوقت
+        gen_kwargs = {'max_new_tokens': 128, 'streamer': streamer, **inputs}
         thread = Thread(target=model.generate, kwargs=gen_kwargs)
         thread.start()
         generated_text = ''
@@ -244,7 +258,7 @@ def _launch_demo(args, model, processor, backend):
         """)
         gr.Markdown("""<center><font size=8>Qwen3-VL العربي</font></center>""")
         gr.Markdown("""<center><font size=4>مساعد ذكاء اصطناعي عربي متعدد الوسائط</font></center>""")
-        gr.Markdown("""<center><font size=3>⚡ يعمل على CPU | نموذج: Qwen2-VL-2B</font></center>""")
+        gr.Markdown(f"""<center><font size=3>Backend: Hugging Face Transformers | النموذج: Qwen2-VL-2B</font></center>""")
 
         chatbot = gr.Chatbot(label='المساعد العربي', elem_classes='control-height', height=500)
         query = gr.Textbox(lines=2, label='أدخل نصك هنا', placeholder='اكتب سؤالك بالعربية...')
@@ -277,6 +291,7 @@ def _launch_demo(args, model, processor, backend):
 
         gr.Markdown("""
         <font size=2>⚠️ تنبيه: هذا العرض التجريبي يخضع لترخيص Qwen3-VL الأصلي.
+        نحن ننصح المستخدمين بعدم إنتاج محتوى ضار.
         </font>
         """)
 
@@ -288,6 +303,7 @@ def _launch_demo(args, model, processor, backend):
     )
 
 
+@spaces.GPU(duration=60)
 def main():
     args = _get_args()
     model, processor, backend = _load_model_processor(args)
