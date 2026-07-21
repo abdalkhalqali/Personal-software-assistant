@@ -4,5 +4,5 @@ torchvision
 qwen-vl-utils
 av
 pillow
-huggingface_hub>=0.23.0
+spaces
 transformers>=4.51.0
