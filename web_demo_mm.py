@@ -21,14 +21,21 @@ from threading import Thread
 from transformers import AutoProcessor, AutoModelForImageTextToText, TextIteratorStreamer
 from qwen_vl_utils import process_vision_info
 
+# ── ZeroGPU (مطلوب على هاردوير zero-gpu وإلا يتوقف التطبيق) ───────────────
+try:
+    import spaces
+    HAS_SPACES = True
+except ImportError:
+    HAS_SPACES = False
+
 # ── Config ─────────────────────────────────────────────────────────────────
 CHECKPOINT     = os.environ.get('MODEL_CHECKPOINT', 'Qwen/Qwen3-VL-2B-Instruct')
 DEVICE         = 'cuda' if torch.cuda.is_available() else 'cpu'
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', '3072'))
 HF_TOKEN       = os.environ.get('HF_TOKEN', '')
 
-# استخدام HF Inference API افتراضياً (لا يستهلك ZeroGPU)
-# اضبط USE_API=0 في متغيرات البيئة للإجبار على التشغيل المحلي
+# HF Inference API أولاً — يعمل على سيرفرات HF البعيدة (لا يستهلك GPU الـ Space)
+# GPU الـ Space يُستخدم فقط كـ fallback إذا فشل الـ API
 USE_API = os.environ.get('USE_API', '1') == '1' and bool(HF_TOKEN)
 IMAGE_EXTS     = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.avif')
 VIDEO_EXTS     = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v')
@@ -302,23 +309,33 @@ def _predict_local(chatbot, history):
         yield chatbot, history
 
 
-def predict(chatbot, history):
+def _predict(chatbot, history):
     """
     المدخل الرئيسي للاستدلال.
-    الأولوية: HF Inference API  ←  GPU محلي  ←  CPU محلي
-    لا يوجد @spaces.GPU — لا استهلاك لحصة ZeroGPU.
+    الأولوية: HF Inference API (سيرفرات HF البعيدة) ← GPU/CPU محلي
+    @spaces.GPU مطلوبة على ZeroGPU hardware لكن الـ GPU يُستخدم فعلياً
+    فقط عند فشل الـ API.
     """
     if USE_API:
         try:
             yield from _predict_api(chatbot, history)
             return
         except Exception as e:
-            print(f"[Agent] API فشل ({e})، تحويل إلى التشغيل المحلي…")
-            # أضف رسالة تنبيه مضمّنة ثم أكمل محلياً
+            print(f"[Agent] API فشل ({e})، تحويل إلى التشغيل المحلي ({DEVICE})…")
             chatbot = list(chatbot or [])
             if chatbot and chatbot[-1].get("role") == "assistant":
                 chatbot[-1]["content"] = f"⚠️ API غير متاح، أستخدم {DEVICE} محلياً…\n\n"
     yield from _predict_local(chatbot, history)
+
+
+# @spaces.GPU مطلوبة على ZeroGPU hardware — بدونها يُقتل التطبيق
+# الاستدلال الفعلي يذهب إلى HF API أولاً فلا يُستهلك GPU إلا كـ fallback
+if HAS_SPACES:
+    @spaces.GPU
+    def predict(chatbot, history):
+        yield from _predict(chatbot, history)
+else:
+    predict = _predict
 
 
 # ── Message helpers ─────────────────────────────────────────────────────────

@@ -7,7 +7,6 @@ sdk: gradio
 sdk_version: 5.49.1
 app_file: web_demo_mm.py
 pinned: false
-hardware: cpu-basic
 ---
 
 # 🎓 الدكتور الذكي — Smart Doctor
