@@ -1,15 +1,27 @@
 ---
-title: Docker
-emoji: 💬
-colorFrom: yellow
-colorTo: purple
+title: مساعد البرمجة الشخصي
+emoji: 🤖
+colorFrom: blue
+colorTo: indigo
 sdk: gradio
-sdk_version: 5.42.0
+sdk_version: 5.49.1
 app_file: app.py
 pinned: false
-hf_oauth: true
-hf_oauth_scopes:
-- inference-api
 ---
 
-An example chatbot using [Gradio](https://gradio.app), [`huggingface_hub`](https://huggingface.co/docs/huggingface_hub/v0.22.2/en/index), and the [Hugging Face Inference API](https://huggingface.co/docs/api-inference/index).
+# 🤖 مساعد البرمجة الشخصي — Qwen3-VL
+
+مساعد برمجة شخصي مدعوم بنموذج Qwen3-VL-2B-Instruct.
+
+## القدرات
+- تحليل الكود وإصلاح الأخطاء
+- قراءة الصور ولقطات الشاشة
+- ربط مستودعات GitHub وقراءة ورفع الملفات
+- يتحدث العربية والإنجليزية
+
+## وضع التشغيل
+1. **HF Inference API** (أولاً) — مجاني بلا حدود يومية
+2. **CPU محلي** (احتياطي) — يعمل دائماً
+
+## المتغيرات المطلوبة
+- `HF_TOKEN` — توكن Hugging Face لتفعيل الـ Inference API
