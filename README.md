@@ -1,13 +1,11 @@
 ---
-title: Docker AI Agent
-emoji: 🤖
-colorFrom: blue
-colorTo: indigo
-sdk: gradio
-sdk_version: 5.49.1
-app_file: app.py
+title: AI Coding Agent - واجهة وكيل البرمجة بالذكاء الاصطناعي
+emoji: 🧠
+colorFrom: pink
+ncolorTo: purple
+sdk: docker
 pinned: false
 ---
 
-# AI Software Assistant
-Professional IDE interface for AI coding agents.
+# 🧠 AI Coding Agent
+واجهة احترافية لوكيل برمجة بالذكاء الاصطناعي مع 4 سمات لونية رومانسية
