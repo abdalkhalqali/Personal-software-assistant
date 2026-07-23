@@ -1,28 +1,29 @@
 """
-CodeCraft — AI Coding Agent (100% Free, Local)
-Runs entirely on Hugging Face Docker Space (16GB RAM, 2 vCPU)
-No API keys needed — model runs locally
+CodeCraft — AI Coding Agent
+Uses HuggingFace Inference API (fast, free) with local model fallback.
+Fixes streaming format to match frontend SSE expectations.
 """
 import os
 import json
 import uuid
 import asyncio
 import threading
+import time
 from typing import AsyncGenerator, Dict, List
 from contextlib import asynccontextmanager
 from collections import defaultdict
 
-import torch
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ── Config ─────────────────────────────────────────────────────────────────
-MODEL_NAME = "Qwen/Qwen3-1.7B-Instruct"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TEXT_MODEL = os.environ.get('TEXT_MODEL', 'Qwen/Qwen2.5-Coder-32B-Instruct')
+LOCAL_MODEL = os.environ.get('LOCAL_MODEL', 'Qwen/Qwen3-1.7B-Instruct')
+HF_TOKEN = os.environ.get('HF_TOKEN', '')
 MAX_NEW_TOKENS = 2048
-MAX_CONVERSATION_HISTORY = 20  # Keep last 20 messages per session
+MAX_CONVERSATION_HISTORY = 20
 
 SYSTEM_PROMPT = """أنت **CodeCraft** — وكيل برمجيات ذكي بالذكاء الاصطناعي.
 
@@ -37,17 +38,16 @@ SYSTEM_PROMPT = """أنت **CodeCraft** — وكيل برمجيات ذكي با�
 - تحليل الأخطاء وإصلاحها
 - فهم هيكل المشاريع
 - تحسين أداء الكود
+- كتابة اختبارات وحدات
 
 أسلوب عملك:
 1. حلّل المطلوب أولاً
 2. قدّم الكود في بلوكات واضحة
-3. اكتب الكود الكامل
+3. اكتب الكود الكامل لا أجزاء
 4. أجب باللغة التي يكتب بها المستخدم"""
 
 # ── Conversation Memory ────────────────────────────────────────────────────
 class ConversationMemory:
-    """In-memory conversation storage per session."""
-
     def __init__(self):
         self.sessions: Dict[str, List[Dict]] = defaultdict(list)
         self.lock = threading.Lock()
@@ -59,7 +59,6 @@ class ConversationMemory:
     def add_message(self, session_id: str, role: str, content: str):
         with self.lock:
             self.sessions[session_id].append({"role": role, "content": content})
-            # Keep only last N messages to fit in context window
             if len(self.sessions[session_id]) > MAX_CONVERSATION_HISTORY:
                 self.sessions[session_id] = self.sessions[session_id][-MAX_CONVERSATION_HISTORY:]
 
@@ -82,98 +81,110 @@ class TerminalRequest(BaseModel):
 class GitCommitRequest(BaseModel):
     message: str
 
-# ── Model Loading ──────────────────────────────────────────────────────────
-class LocalModel:
-    """Manages the local Qwen3 model."""
-
+# ── Chat Handler ───────────────────────────────────────────────────────────
+class ChatHandler:
     def __init__(self):
-        self.model = None
-        self.tokenizer = None
+        self.local_model = None
+        self.local_tokenizer = None
         self.lock = threading.Lock()
 
-    def load(self):
-        if self.model is not None:
+    def load_local(self):
+        if self.local_model is not None:
             return
         with self.lock:
-            if self.model is not None:
+            if self.local_model is not None:
                 return
-            print(f"[CodeCraft] Loading {MODEL_NAME} on {DEVICE}...")
-            print(f"[CodeCraft] This may take 2-3 minutes on first load...")
+            print(f"[CodeCraft] Loading local model: {LOCAL_MODEL}...")
+            import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
-
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                MODEL_NAME,
+            self.local_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL, trust_remote_code=True)
+            self.local_model = AutoModelForCausalLM.from_pretrained(
+                LOCAL_MODEL,
                 trust_remote_code=True,
-            )
-
-            self.model = AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-                torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
-                device_map="auto" if DEVICE == "cuda" else None,
+                torch_dtype=torch.float32,
                 low_cpu_mem_usage=True,
             )
-            self.model.eval()
-            print(f"[CodeCraft] Model loaded successfully!")
+            self.local_model.eval()
+            print("[CodeCraft] Local model ready!")
 
-    def generate(self, messages: List[Dict], temperature: float, max_tokens: int) -> str:
-        self.load()
+    async def chat_stream(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
+        """Try HF API first, fallback to local model."""
+        # Try HF Inference API first (fast, free with rate limits)
+        if HF_TOKEN:
+            try:
+                async for chunk in self._stream_hf_api(messages, max_tokens):
+                    yield chunk
+                return
+            except Exception as e:
+                print(f"[CodeCraft] HF API failed: {e}")
+                yield self._sse({"token": f"\n⚠️ API unavailable, using local model...\n"})
 
-        # Build conversation for the model
-        system_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-        all_msgs = system_msgs + messages
+        # Fallback to local model (slower but free)
+        try:
+            async for chunk in self._stream_local(messages, temperature, max_tokens):
+                yield chunk
+        except Exception as e:
+            yield self._sse({"token": f"\n❌ Error: {str(e)}\n"})
 
-        text = self.tokenizer.apply_chat_template(
-            all_msgs,
-            tokenize=False,
-            add_generation_prompt=True,
+    async def _stream_hf_api(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
+        """Stream from HuggingFace Inference API."""
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(model=TEXT_MODEL, token=HF_TOKEN)
+
+        api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                api_msgs.append({"role": role, "content": content})
+            elif isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            parts.append({"type": "text", "text": item.get("text", "")})
+                        elif item.get("type") == "image_url":
+                            parts.append(item)
+                if parts:
+                    api_msgs.append({"role": role, "content": parts})
+
+        stream = client.chat_completion(
+            messages=api_msgs,
+            max_tokens=max_tokens,
+            temperature=0.7,
+            stream=True,
         )
 
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield self._sse({"token": delta})
 
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                temperature=temperature if temperature > 0 else None,
-                do_sample=temperature > 0,
-                repetition_penalty=1.1,
-                top_p=0.9 if temperature > 0 else None,
-            )
-
-        # Decode only the new tokens
-        new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-        response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
-        return response
-
-    def generate_stream(self, messages: List[Dict], temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream tokens using a background thread."""
-        self.load()
+    async def _stream_local(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
+        """Stream from local model."""
+        import torch
         import queue
+
+        self.load_local()
+
+        api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                api_msgs.append({"role": role, "content": content})
 
         q = queue.Queue()
 
         def _generate():
             try:
-                system_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-                all_msgs = system_msgs + messages
-
-                text = self.tokenizer.apply_chat_template(
-                    all_msgs,
-                    tokenize=False,
-                    add_generation_prompt=True,
+                text = self.local_tokenizer.apply_chat_template(
+                    api_msgs, tokenize=False, add_generation_prompt=True
                 )
+                inputs = self.local_tokenizer(text, return_tensors="pt").to(self.local_model.device)
 
-                inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
-
-                # Use TextIteratorStreamer for streaming
                 from transformers import TextIteratorStreamer
-
-                streamer = TextIteratorStreamer(
-                    self.tokenizer,
-                    skip_prompt=True,
-                    skip_special_tokens=True,
-                )
+                streamer = TextIteratorStreamer(self.local_tokenizer, skip_prompt=True, skip_special_tokens=True)
 
                 gen_kwargs = {
                     **inputs,
@@ -181,24 +192,18 @@ class LocalModel:
                     "temperature": temperature if temperature > 0 else None,
                     "do_sample": temperature > 0,
                     "repetition_penalty": 1.1,
-                    "top_p": 0.9 if temperature > 0 else None,
                     "streamer": streamer,
                 }
 
-                thread = threading.Thread(
-                    target=self.model.generate,
-                    kwargs=gen_kwargs,
-                    daemon=True,
-                )
+                thread = threading.Thread(target=self.local_model.generate, kwargs=gen_kwargs, daemon=True)
                 thread.start()
 
                 for chunk in streamer:
                     if chunk:
                         q.put(chunk)
-
-                q.put(None)  # Signal completion
+                q.put(None)
             except Exception as e:
-                q.put(f"\n⚠️ Error: {str(e)}")
+                q.put(f"Error: {str(e)}")
                 q.put(None)
 
         thread = threading.Thread(target=_generate, daemon=True)
@@ -208,24 +213,28 @@ class LocalModel:
             token = q.get()
             if token is None:
                 break
-            yield token
+            yield self._sse({"token": token})
+
+    @staticmethod
+    def _sse(data: dict) -> str:
+        """Format as Server-Sent Event."""
+        return f"data: {json.dumps(data)}\n\n"
 
 
-local_model = LocalModel()
+chat_handler = ChatHandler()
 
 # ── Lifespan ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("=" * 60)
-    print("🧠 CodeCraft — AI Coding Agent (100% Free)")
+    print("🧠 CodeCraft — AI Coding Agent")
     print("=" * 60)
-    print(f"Model: {MODEL_NAME}")
-    print(f"Device: {DEVICE}")
-    print(f"RAM: ~4GB (Qwen3-1.7B)")
-    print(f"Status: ✅ No API keys needed!")
+    print(f"API Model: {TEXT_MODEL}")
+    print(f"Local Fallback: {LOCAL_MODEL}")
+    print(f"HF Token: {'✅ Set' if HF_TOKEN else '❌ Not set (local only)'}")
     print("=" * 60)
-    # Pre-load model in background
-    threading.Thread(target=local_model.load, daemon=True).start()
+    # Pre-load local model in background
+    threading.Thread(target=chat_handler.load_local, daemon=True).start()
     yield
     print("[CodeCraft] Shutting down...")
 
@@ -244,7 +253,6 @@ app.add_middleware(
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     """Streaming chat endpoint with conversation memory."""
-
     session_id = request.session_id or str(uuid.uuid4())
 
     # Add user messages to memory
@@ -253,34 +261,33 @@ async def chat(request: ChatRequest):
             content = msg.get("content", "")
             if isinstance(content, str):
                 memory.add_message(session_id, "user", content)
-            elif isinstance(content, list):
-                # Extract text from content list
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        memory.add_message(session_id, "user", item.get("text", ""))
 
-    # Get full conversation history from memory
+    # Get full conversation history
     history = memory.get_history(session_id)
 
     async def generate():
         full_response = ""
         try:
-            for token in local_model.generate_stream(
-                history,
-                request.temperature,
-                request.max_tokens,
-            ):
-                full_response += token
-                yield json.dumps({"token": token}) + "\n"
+            async for sse_chunk in chat_handler.chat_stream(history, request.temperature, request.max_tokens):
+                yield sse_chunk
+                # Extract token for memory
+                if "data: " in sse_chunk:
+                    try:
+                        data = json.loads(sse_chunk.replace("data: ", "").strip())
+                        if data.get("token"):
+                            full_response += data["token"]
+                    except:
+                        pass
 
             # Save assistant response to memory
-            memory.add_message(session_id, "assistant", full_response)
+            if full_response:
+                memory.add_message(session_id, "assistant", full_response)
 
-            # Send session_id for frontend to track
-            yield json.dumps({"token": "", "session_id": session_id}) + "\n"
+            # Send done signal with session_id
+            yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
 
         except Exception as e:
-            yield json.dumps({"token": f"\n⚠️ Error: {str(e)}\n"}) + "\n"
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -292,32 +299,23 @@ async def chat(request: ChatRequest):
         },
     )
 
-# ── Memory Management ──────────────────────────────────────────────────────
+# ── Memory ─────────────────────────────────────────────────────────────────
 @app.delete("/api/memory/{session_id}")
 async def clear_memory(session_id: str):
-    """Clear conversation history for a session."""
     memory.clear_session(session_id)
     return {"message": "Memory cleared"}
 
 @app.get("/api/memory/{session_id}")
 async def get_memory(session_id: str):
-    """Get conversation history for a session."""
     history = memory.get_history(session_id)
     return {"session_id": session_id, "messages": history}
 
 # ── Terminal ───────────────────────────────────────────────────────────────
 @app.post("/api/terminal")
 async def terminal(request: TerminalRequest):
-    """Execute a terminal command."""
     import subprocess
     try:
-        result = subprocess.run(
-            request.command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        result = subprocess.run(request.command, shell=True, capture_output=True, text=True, timeout=30)
         output = result.stdout or result.stderr or "✅ Command executed (no output)"
         return {"output": output.strip()}
     except subprocess.TimeoutExpired:
@@ -328,7 +326,6 @@ async def terminal(request: TerminalRequest):
 # ── Files ──────────────────────────────────────────────────────────────────
 @app.get("/api/files")
 async def list_files():
-    """List project files."""
     import os
     files = []
     root = os.path.dirname(os.path.abspath(__file__))
@@ -349,27 +346,19 @@ async def list_files():
 # ── Git ────────────────────────────────────────────────────────────────────
 @app.get("/api/git/status")
 async def git_status():
-    """Get git status."""
     import subprocess
     try:
-        branch = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5
-        ).stdout.strip()
+        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=5).stdout.strip()
         return {"branch": branch, "staged": [], "unstaged": [], "ahead": 0, "behind": 0}
     except:
         return {"branch": "main", "staged": [], "unstaged": [], "ahead": 0, "behind": 0}
 
 @app.post("/api/git/commit")
 async def git_commit(request: GitCommitRequest):
-    """Create a git commit."""
     import subprocess
     try:
         subprocess.run(["git", "add", "."], check=True, timeout=10)
-        result = subprocess.run(
-            ["git", "commit", "-m", request.message],
-            capture_output=True, text=True, timeout=10,
-        )
+        result = subprocess.run(["git", "commit", "-m", request.message], capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             return {"message": f"✅ Committed: {result.stdout.strip()}"}
         else:
@@ -380,16 +369,15 @@ async def git_commit(request: GitCommitRequest):
 # ── Health ─────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    """Health check endpoint."""
     return {
         "status": "ok",
-        "model": MODEL_NAME,
-        "device": DEVICE,
-        "api_keys_needed": False,
+        "api_model": TEXT_MODEL,
+        "local_model": LOCAL_MODEL,
+        "hf_token": bool(HF_TOKEN),
         "memory_enabled": True,
     }
 
-# ── Serve Frontend ─────────────────────────────────────────────────────────
+# ── Frontend ───────────────────────────────────────────────────────────────
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
 @app.get("/")
@@ -397,9 +385,7 @@ async def serve_index():
     index_path = os.path.join(FRONTEND_DIST, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return JSONResponse({
-        "message": "CodeCraft API — Frontend not built. Run: cd frontend && bun run build"
-    })
+    return JSONResponse({"message": "CodeCraft API — Frontend not built"})
 
 @app.get("/assets/{path:path}")
 async def serve_assets(path: str):
@@ -408,7 +394,7 @@ async def serve_assets(path: str):
         return FileResponse(file_path)
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-# ── Entry Point ────────────────────────────────────────────────────────────
+# ── Entry ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "7860"))
