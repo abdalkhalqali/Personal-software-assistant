@@ -1,7 +1,7 @@
 """
 CodeCraft — AI Coding Agent
-Uses HuggingFace Inference API (fast, free) with local model fallback.
-Fixes streaming format to match frontend SSE expectations.
+Local-first architecture: optimized CPU model → Groq API → HuggingFace API
+Authoritative Coding Agent with Arabic support.
 """
 import os
 import json
@@ -9,7 +9,7 @@ import uuid
 import asyncio
 import threading
 import time
-from typing import AsyncGenerator, Dict, List
+from typing import AsyncGenerator, Dict, List, Optional
 from contextlib import asynccontextmanager
 from collections import defaultdict
 
@@ -19,8 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ── Config ─────────────────────────────────────────────────────────────────
-TEXT_MODEL = os.environ.get('TEXT_MODEL', 'Qwen/Qwen2.5-Coder-32B-Instruct')
 LOCAL_MODEL = os.environ.get('LOCAL_MODEL', 'Qwen/Qwen3-1.7B-Instruct')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 HF_TOKEN = os.environ.get('HF_TOKEN', '')
 MAX_NEW_TOKENS = 2048
 MAX_CONVERSATION_HISTORY = 20
@@ -31,20 +31,20 @@ SYSTEM_PROMPT = """أنت **CodeCraft** — وكيل برمجيات ذكي با�
 - اسمك: CodeCraft
 - وظيفتك: وكيل برمجيات ذكي متخصص في البرمجة والتطوير
 - لا تقل أبداً أنك بوت محادثة أو مساعد عام
-- أنت تتحدث كمهندس برمجيات حقيقي
+- أنت تتحدث كمهندس برمجيات حقيقي خبير
 
 قدراتك:
 - كتابة كود بلغات متعددة (Python, JavaScript, TypeScript, Java, Go, Rust, C++)
 - تحليل الأخطاء وإصلاحها
-- فهم هيكل المشاريع
+- فهم هيكل المشاريع وتطويرها
 - تحسين أداء الكود
 - كتابة اختبارات وحدات
 
 أسلوب عملك:
-1. حلّل المطلوب أولاً
-2. قدّم الكود في بلوكات واضحة
+1. حلّل المطلوب أولاً قبل الرد
+2. قدّم الكود في بلوكات واضحة مع الشرح
 3. اكتب الكود الكامل لا أجزاء
-4. أجب باللغة التي يكتب بها المستخدم"""
+4. أجب باللغة التي يكتب بها المستخدم (عربي أو إنجليزي)"""
 
 # ── Conversation Memory ────────────────────────────────────────────────────
 class ConversationMemory:
@@ -86,18 +86,27 @@ class ChatHandler:
     def __init__(self):
         self.local_model = None
         self.local_tokenizer = None
-        self.lock = threading.Lock()
+        self.model_lock = threading.Lock()
+        self._model_loaded = False
 
     def load_local(self):
-        if self.local_model is not None:
+        """Load the local CPU model with optimizations."""
+        if self._model_loaded:
             return
-        with self.lock:
-            if self.local_model is not None:
+        with self.model_lock:
+            if self._model_loaded:
                 return
-            print(f"[CodeCraft] Loading local model: {LOCAL_MODEL}...")
+            print(f"[CodeCraft] 🔄 Loading local model: {LOCAL_MODEL}...")
+            t0 = time.time()
             import torch
+            # Optimize CPU threads
+            cpu_count = os.cpu_count() or 2
+            torch.set_num_threads(max(1, cpu_count - 1))
             from transformers import AutoModelForCausalLM, AutoTokenizer
-            self.local_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL, trust_remote_code=True)
+
+            self.local_tokenizer = AutoTokenizer.from_pretrained(
+                LOCAL_MODEL, trust_remote_code=True
+            )
             self.local_model = AutoModelForCausalLM.from_pretrained(
                 LOCAL_MODEL,
                 trust_remote_code=True,
@@ -105,67 +114,53 @@ class ChatHandler:
                 low_cpu_mem_usage=True,
             )
             self.local_model.eval()
-            print("[CodeCraft] Local model ready!")
+            self._model_loaded = True
+            elapsed = time.time() - t0
+            print(f"[CodeCraft] ✅ Local model ready in {elapsed:.1f}s")
 
     async def chat_stream(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Try HF API first, fallback to local model."""
-        # Try HF Inference API first (fast, free with rate limits)
+        """Cascade: Local (primary) → Groq → HF API (fallbacks)."""
+        # 1️⃣ Local model (always available, free forever)
+        try:
+            async for chunk in self._stream_local(messages, temperature, max_tokens):
+                yield chunk
+            return
+        except Exception as e:
+            err_msg = str(e)
+            print(f"[CodeCraft] ❌ Local model failed: {err_msg[:100]}")
+            yield self._sse({"warning": True, "token": ""})
+
+        # 2️⃣ Groq API (fast fallback, if key available)
+        if GROQ_API_KEY:
+            try:
+                async for chunk in self._stream_groq(messages, max_tokens):
+                    yield chunk
+                return
+            except Exception as e:
+                print(f"[CodeCraft] ❌ Groq failed: {e}")
+                yield self._sse({"warning": True, "token": ""})
+
+        # 3️⃣ HF Inference API (last resort, if token available)
         if HF_TOKEN:
             try:
                 async for chunk in self._stream_hf_api(messages, max_tokens):
                     yield chunk
                 return
             except Exception as e:
-                print(f"[CodeCraft] HF API failed: {e}")
-                yield self._sse({"token": f"\n⚠️ API unavailable, using local model...\n"})
+                print(f"[CodeCraft] ❌ HF API failed: {e}")
+                yield self._sse({"warning": True, "token": ""})
 
-        # Fallback to local model (slower but free)
-        try:
-            async for chunk in self._stream_local(messages, temperature, max_tokens):
-                yield chunk
-        except Exception as e:
-            yield self._sse({"token": f"\n❌ Error: {str(e)}\n"})
-
-    async def _stream_hf_api(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream from HuggingFace Inference API."""
-        from huggingface_hub import InferenceClient
-        client = InferenceClient(model=TEXT_MODEL, token=HF_TOKEN)
-
-        api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                api_msgs.append({"role": role, "content": content})
-            elif isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, dict):
-                        if item.get("type") == "text":
-                            parts.append({"type": "text", "text": item.get("text", "")})
-                        elif item.get("type") == "image_url":
-                            parts.append(item)
-                if parts:
-                    api_msgs.append({"role": role, "content": parts})
-
-        stream = client.chat_completion(
-            messages=api_msgs,
-            max_tokens=max_tokens,
-            temperature=0.7,
-            stream=True,
-        )
-
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
-            if delta:
-                yield self._sse({"token": delta})
+        # 😢 All failed
+        yield self._sse({"token": "\n\n⚠️ عذراً، جميع مزودي الذكاء غير متاحين حالياً. حاول مرة أخرى لاحقاً.\n"})
 
     async def _stream_local(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream from local model."""
+        """Stream from local CPU model (primary)."""
         import torch
         import queue
 
         self.load_local()
+        if not self._model_loaded:
+            raise RuntimeError("Local model failed to load")
 
         api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
         for msg in messages:
@@ -181,10 +176,16 @@ class ChatHandler:
                 text = self.local_tokenizer.apply_chat_template(
                     api_msgs, tokenize=False, add_generation_prompt=True
                 )
-                inputs = self.local_tokenizer(text, return_tensors="pt").to(self.local_model.device)
+                inputs = self.local_tokenizer(text, return_tensors="pt")
+                # Ensure inputs are on the right device
+                inputs = {k: v.to(self.local_model.device) for k, v in inputs.items()}
 
                 from transformers import TextIteratorStreamer
-                streamer = TextIteratorStreamer(self.local_tokenizer, skip_prompt=True, skip_special_tokens=True)
+                streamer = TextIteratorStreamer(
+                    self.local_tokenizer,
+                    skip_prompt=True,
+                    skip_special_tokens=True,
+                )
 
                 gen_kwargs = {
                     **inputs,
@@ -203,7 +204,8 @@ class ChatHandler:
                         q.put(chunk)
                 q.put(None)
             except Exception as e:
-                q.put(f"Error: {str(e)}")
+                print(f"[CodeCraft] Local gen error: {e}")
+                q.put(f"\n\n⚠️ خطأ في التوليد المحلي: {e}\n")
                 q.put(None)
 
         thread = threading.Thread(target=_generate, daemon=True)
@@ -215,6 +217,61 @@ class ChatHandler:
                 break
             yield self._sse({"token": token})
 
+    async def _stream_groq(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
+        """Stream from Groq Cloud API (fast fallback)."""
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=GROQ_API_KEY,
+            base_url="https://api.groq.com/openai/v1",
+        )
+
+        api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                api_msgs.append({"role": role, "content": content})
+
+        stream = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=api_msgs,
+            max_tokens=max_tokens,
+            temperature=0.7,
+            stream=True,
+        )
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield self._sse({"token": delta})
+
+    async def _stream_hf_api(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
+        """Stream from HuggingFace Inference API (last resort)."""
+        from huggingface_hub import InferenceClient
+
+        client = InferenceClient(token=HF_TOKEN)
+
+        api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                api_msgs.append({"role": role, "content": content})
+
+        stream = client.chat_completion(
+            messages=api_msgs,
+            model="Qwen/Qwen2.5-Coder-32B-Instruct",
+            max_tokens=max_tokens,
+            temperature=0.7,
+            stream=True,
+        )
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield self._sse({"token": delta})
+
     @staticmethod
     def _sse(data: dict) -> str:
         """Format as Server-Sent Event."""
@@ -223,23 +280,32 @@ class ChatHandler:
 
 chat_handler = ChatHandler()
 
+# ── Providers info ─────────────────────────────────────────────────────────
+def get_provider_status() -> dict:
+    return {
+        "local": LOCAL_MODEL,
+        "local_loaded": chat_handler._model_loaded,
+        "groq": bool(GROQ_API_KEY),
+        "hf_api": bool(HF_TOKEN),
+    }
+
 # ── Lifespan ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("=" * 60)
-    print("🧠 CodeCraft — AI Coding Agent")
+    print("🧠 CodeCraft — AI Coding Agent v5.0")
     print("=" * 60)
-    print(f"API Model: {TEXT_MODEL}")
-    print(f"Local Fallback: {LOCAL_MODEL}")
-    print(f"HF Token: {'✅ Set' if HF_TOKEN else '❌ Not set (local only)'}")
+    print(f"🏠 Local model: {LOCAL_MODEL}")
+    print(f"⚡ Groq API:    {'✅ Ready' if GROQ_API_KEY else '⏸️  Not configured'}")
+    print(f"🌐 HF API:      {'✅ Ready' if HF_TOKEN else '⏸️  Not configured'}")
     print("=" * 60)
-    # Pre-load local model in background
+    print("🔄 Loading local model in background...")
     threading.Thread(target=chat_handler.load_local, daemon=True).start()
     yield
     print("[CodeCraft] Shutting down...")
 
 # ── FastAPI App ────────────────────────────────────────────────────────────
-app = FastAPI(title="CodeCraft API", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="CodeCraft API", version="5.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -371,9 +437,7 @@ async def git_commit(request: GitCommitRequest):
 async def health():
     return {
         "status": "ok",
-        "api_model": TEXT_MODEL,
-        "local_model": LOCAL_MODEL,
-        "hf_token": bool(HF_TOKEN),
+        "providers": get_provider_status(),
         "memory_enabled": True,
     }
 
