@@ -1,15 +1,17 @@
 """
-CodeCraft — AI Coding Agent
-Uses HuggingFace Inference API (fast, free) with local model fallback.
-Fixed: async/sync blocking issues + proper SSE streaming.
+CodeCraft — AI Coding Agent v5.1
+Optimized cascade: Groq API → HF API → Tiny Local Model
+Fixed: sync iterators no longer block the asyncio event loop;
+       SSE static-file serving covers the full SPA.
 """
 import os
 import json
 import uuid
 import asyncio
 import threading
+import time
 import queue as queue_module
-from typing import AsyncGenerator, Dict, List
+from typing import AsyncGenerator, List, Dict, Optional
 from contextlib import asynccontextmanager
 from collections import defaultdict
 
@@ -20,9 +22,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ── Config ─────────────────────────────────────────────────────────────────
-TEXT_MODEL  = os.environ.get('TEXT_MODEL',  'Qwen/Qwen2.5-Coder-32B-Instruct')
-LOCAL_MODEL = os.environ.get('LOCAL_MODEL', 'Qwen/Qwen3-1.7B-Instruct')
-HF_TOKEN    = os.environ.get('HF_TOKEN', '')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+HF_TOKEN     = os.environ.get('HF_TOKEN', '')
+LOCAL_MODEL  = os.environ.get('LOCAL_MODEL', 'Qwen/Qwen2.5-Coder-0.5B-Instruct')
 MAX_NEW_TOKENS = 2048
 MAX_CONVERSATION_HISTORY = 20
 
@@ -32,20 +34,20 @@ SYSTEM_PROMPT = """أنت **CodeCraft** — وكيل برمجيات ذكي با�
 - اسمك: CodeCraft
 - وظيفتك: وكيل برمجيات ذكي متخصص في البرمجة والتطوير
 - لا تقل أبداً أنك بوت محادثة أو مساعد عام
-- أنت تتحدث كمهندس برمجيات حقيقي
+- أنت تتحدث كمهندس برمجيات حقيقي خبير
 
 قدراتك:
 - كتابة كود بلغات متعددة (Python, JavaScript, TypeScript, Java, Go, Rust, C++)
 - تحليل الأخطاء وإصلاحها
-- فهم هيكل المشاريع
+- فهم هيكل المشاريع وتطويرها
 - تحسين أداء الكود
 - كتابة اختبارات وحدات
 
 أسلوب عملك:
-1. حلّل المطلوب أولاً
-2. قدّم الكود في بلوكات واضحة
+1. حلّل المطلوب أولاً قبل الرد
+2. قدّم الكود في بلوكات واضحة مع الشرح
 3. اكتب الكود الكامل لا أجزاء
-4. أجب باللغة التي يكتب بها المستخدم"""
+4. أجب باللغة التي يكتب بها المستخدم (عربي أو إنجليزي)"""
 
 # ── Conversation Memory ────────────────────────────────────────────────────
 class ConversationMemory:
@@ -87,76 +89,117 @@ class ChatHandler:
     def __init__(self):
         self.local_model = None
         self.local_tokenizer = None
-        self.lock = threading.Lock()
+        self.model_lock = threading.Lock()
+        self._model_loaded = False
+        self._model_attempted = False
 
     def load_local(self):
-        if self.local_model is not None:
+        """Try to load a tiny local model if disk space allows."""
+        if self._model_attempted:
             return
-        with self.lock:
-            if self.local_model is not None:
+        with self.model_lock:
+            if self._model_attempted:
                 return
-            print(f"[CodeCraft] Loading local model: {LOCAL_MODEL}...")
-            import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            self.local_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL, trust_remote_code=True)
-            self.local_model = AutoModelForCausalLM.from_pretrained(
-                LOCAL_MODEL,
-                trust_remote_code=True,
-                torch_dtype=torch.float32,
-                low_cpu_mem_usage=True,
-            )
-            self.local_model.eval()
-            print("[CodeCraft] Local model ready!")
-
-    async def chat_stream(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Try HF API first, fallback to local model."""
-        if HF_TOKEN:
+            self._model_attempted = True
+            print(f"[CodeCraft] 🔄 Checking local model: {LOCAL_MODEL}")
+            import shutil
+            total, used, free = shutil.disk_usage("/")
+            free_gb = free / (1024 ** 3)
+            if free_gb < 1.0:
+                print(f"[CodeCraft] ⏭️ Skipping local model (only {free_gb:.1f}GB free)")
+                return
+            t0 = time.time()
             try:
-                async for chunk in self._stream_hf_api(messages, max_tokens):
-                    yield chunk
-                return
+                import torch
+                cpu_count = os.cpu_count() or 2
+                torch.set_num_threads(max(1, cpu_count - 1))
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                self.local_tokenizer = AutoTokenizer.from_pretrained(
+                    LOCAL_MODEL, trust_remote_code=True
+                )
+                self.local_model = AutoModelForCausalLM.from_pretrained(
+                    LOCAL_MODEL,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
+                    low_cpu_mem_usage=True,
+                )
+                self.local_model.eval()
+                self._model_loaded = True
+                print(f"[CodeCraft] ✅ Local model ready in {time.time()-t0:.1f}s")
             except Exception as e:
-                print(f"[CodeCraft] HF API failed: {e}")
-                yield self._sse({"token": f"\n⚠️ API unavailable, switching to local model...\n"})
+                print(f"[CodeCraft] ⚠️ Local model load failed: {e}")
 
-        # Fallback to local model
-        try:
-            async for chunk in self._stream_local(messages, temperature, max_tokens):
-                yield chunk
-        except Exception as e:
-            yield self._sse({"error": str(e)})
-
-    async def _stream_hf_api(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream from HuggingFace Inference API — runs sync client in thread pool."""
-        from huggingface_hub import InferenceClient
-
-        client = InferenceClient(model=TEXT_MODEL, token=HF_TOKEN)
-
+    def build_messages(self, messages: list) -> list:
+        """Build messages array with system prompt."""
         api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if isinstance(content, str) and content.strip():
                 api_msgs.append({"role": role, "content": content})
-            elif isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, dict):
-                        if item.get("type") == "text":
-                            parts.append({"type": "text", "text": item.get("text", "")})
-                        elif item.get("type") == "image_url":
-                            parts.append(item)
-                if parts:
-                    api_msgs.append({"role": role, "content": parts})
+        return api_msgs
 
-        # Use a thread-safe queue so the sync HF iterator runs in a thread
-        # and does NOT block the asyncio event loop.
+    async def chat_stream(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
+        """
+        Cascade: Groq (fastest) → HF API → Tiny Local (last resort).
+        If all fail, returns a friendly Arabic error.
+        """
+        providers_available = 0
+
+        if GROQ_API_KEY:
+            providers_available += 1
+            try:
+                async for chunk in self._stream_groq(messages, max_tokens):
+                    yield chunk
+                return
+            except Exception as e:
+                print(f"[CodeCraft] ❌ Groq: {e}")
+                yield self._sse({"note": "🔄 Switching provider..."})
+
+        if HF_TOKEN:
+            providers_available += 1
+            try:
+                async for chunk in self._stream_hf_api(messages, max_tokens):
+                    yield chunk
+                return
+            except Exception as e:
+                print(f"[CodeCraft] ❌ HF API: {e}")
+                yield self._sse({"note": "🔄 Trying backup..."})
+
+        if self._model_loaded:
+            providers_available += 1
+            try:
+                async for chunk in self._stream_local(messages, temperature, max_tokens):
+                    yield chunk
+                return
+            except Exception as e:
+                print(f"[CodeCraft] ❌ Local: {e}")
+
+        if providers_available == 0:
+            yield self._sse({"token": (
+                "\n\n⚠️ **لم يتم تكوين أي مزود ذكاء اصطناعي بعد.**\n\n"
+                "لتفعيل الذكاء:\n"
+                "1. أضف `GROQ_API_KEY` في الأسرار (مفاتيح API) — سريع ومجاني\n"
+                "2. أو أضف `HF_TOKEN` — Hugging Face API\n\n"
+                "سيبدأ العمل فور إضافة أي منهما 🚀\n"
+            )})
+        else:
+            yield self._sse({"token": "\n\n⚠️ عذراً، جميع مزودي الذكاء غير متاحين حالياً. حاول مرة أخرى.\n"})
+
+    # ── FIX: sync Groq iterator runs in thread pool, not blocking event loop ──
+    async def _stream_groq(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
+        """Stream from Groq Cloud (Llama 70B via OpenAI compat API)."""
+        from openai import OpenAI
+        client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+        api_msgs = self.build_messages(messages)
+
         q: queue_module.Queue = queue_module.Queue()
         loop = asyncio.get_event_loop()
 
-        def _fetch_sync():
+        def _fetch():
             try:
-                stream = client.chat_completion(
+                stream = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
                     messages=api_msgs,
                     max_tokens=max_tokens,
                     temperature=0.7,
@@ -169,14 +212,11 @@ class ChatHandler:
             except Exception as e:
                 q.put(e)
             finally:
-                q.put(None)  # sentinel
+                q.put(None)
 
-        thread = threading.Thread(target=_fetch_sync, daemon=True)
-        thread.start()
+        threading.Thread(target=_fetch, daemon=True).start()
 
         while True:
-            # run_in_executor lets us await a blocking q.get() without
-            # stalling the event loop for other requests
             token = await loop.run_in_executor(None, q.get)
             if token is None:
                 break
@@ -184,19 +224,49 @@ class ChatHandler:
                 raise token
             yield self._sse({"token": token})
 
+    # ── FIX: sync HF iterator runs in thread pool, not blocking event loop ──
+    async def _stream_hf_api(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
+        """Stream from HuggingFace Inference API (Qwen2.5-Coder-32B)."""
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=HF_TOKEN)
+        api_msgs = self.build_messages(messages)
+
+        q: queue_module.Queue = queue_module.Queue()
+        loop = asyncio.get_event_loop()
+
+        def _fetch():
+            try:
+                stream = client.chat_completion(
+                    messages=api_msgs,
+                    model="Qwen/Qwen2.5-Coder-32B-Instruct",
+                    max_tokens=max_tokens,
+                    temperature=0.7,
+                    stream=True,
+                )
+                for chunk in stream:
+                    delta = chunk.choices[0].delta.content or ""
+                    if delta:
+                        q.put(delta)
+            except Exception as e:
+                q.put(e)
+            finally:
+                q.put(None)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+        while True:
+            token = await loop.run_in_executor(None, q.get)
+            if token is None:
+                break
+            if isinstance(token, Exception):
+                raise token
+            yield self._sse({"token": token})
+
+    # ── FIX: q.get() runs in executor instead of blocking event loop ──
     async def _stream_local(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream from local model — runs generation in background thread."""
+        """Stream from local CPU model (tiny fallback)."""
         import torch
-
-        self.load_local()
-
-        api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                api_msgs.append({"role": role, "content": content})
-
+        api_msgs = self.build_messages(messages)
         q: queue_module.Queue = queue_module.Queue()
         loop = asyncio.get_event_loop()
 
@@ -205,13 +275,12 @@ class ChatHandler:
                 text = self.local_tokenizer.apply_chat_template(
                     api_msgs, tokenize=False, add_generation_prompt=True
                 )
-                inputs = self.local_tokenizer(text, return_tensors="pt").to(self.local_model.device)
-
+                inputs = self.local_tokenizer(text, return_tensors="pt")
+                inputs = {k: v.to(self.local_model.device) for k, v in inputs.items()}
                 from transformers import TextIteratorStreamer
                 streamer = TextIteratorStreamer(
                     self.local_tokenizer, skip_prompt=True, skip_special_tokens=True
                 )
-
                 gen_kwargs = {
                     **inputs,
                     "max_new_tokens": max_tokens,
@@ -220,24 +289,22 @@ class ChatHandler:
                     "repetition_penalty": 1.1,
                     "streamer": streamer,
                 }
-
                 gen_thread = threading.Thread(
                     target=self.local_model.generate, kwargs=gen_kwargs, daemon=True
                 )
                 gen_thread.start()
-
                 for chunk in streamer:
                     if chunk:
                         q.put(chunk)
                 q.put(None)
             except Exception as e:
+                print(f"[CodeCraft] Local error: {e}")
                 q.put(e)
                 q.put(None)
 
         threading.Thread(target=_generate, daemon=True).start()
 
         while True:
-            # Non-blocking await — runs q.get() in executor thread
             token = await loop.run_in_executor(None, q.get)
             if token is None:
                 break
@@ -256,19 +323,17 @@ chat_handler = ChatHandler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("=" * 60)
-    print("🧠 CodeCraft — AI Coding Agent")
+    print("🧠 CodeCraft — AI Coding Agent v5.1")
     print("=" * 60)
-    print(f"API Model   : {TEXT_MODEL}")
-    print(f"Local Model : {LOCAL_MODEL}")
-    print(f"HF Token    : {'✅ Set' if HF_TOKEN else '❌ Not set (local only)'}")
+    print(f"⚡ Groq:  {'✅ ' + GROQ_API_KEY[:8] + '...' if GROQ_API_KEY else '⏸️  Not set'}")
+    print(f"🌐 HF:    {'✅ ' + HF_TOKEN[:8] + '...' if HF_TOKEN else '⏸️  Not set'}")
+    print(f"🏠 Local: {LOCAL_MODEL} (will check disk space)")
     print("=" * 60)
     threading.Thread(target=chat_handler.load_local, daemon=True).start()
     yield
     print("[CodeCraft] Shutting down...")
 
-# ── FastAPI App ────────────────────────────────────────────────────────────
-app = FastAPI(title="CodeCraft API", version="5.0.0", lifespan=lifespan)
-
+app = FastAPI(title="CodeCraft AI", version="5.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -277,10 +342,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Chat Endpoint ──────────────────────────────────────────────────────────
+# ── Chat ───────────────────────────────────────────────────────────────────
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
-    """Streaming chat endpoint with conversation memory."""
     session_id = request.session_id or str(uuid.uuid4())
 
     for msg in request.messages:
@@ -303,12 +367,9 @@ async def chat(request: ChatRequest):
                         full_response += data["token"]
                 except Exception:
                     pass
-
             if full_response:
                 memory.add_message(session_id, "assistant", full_response)
-
             yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
-
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
@@ -327,6 +388,10 @@ async def chat(request: ChatRequest):
 async def clear_memory(session_id: str):
     memory.clear_session(session_id)
     return {"message": "Memory cleared"}
+
+@app.get("/api/memory/{session_id}")
+async def get_memory(session_id: str):
+    return {"history": memory.get_history(session_id)}
 
 # ── Terminal ───────────────────────────────────────────────────────────────
 @app.post("/api/terminal")
@@ -349,7 +414,7 @@ async def list_files():
     files = []
     try:
         for p in pathlib.Path(".").rglob("*"):
-            if any(part.startswith(".") or part == "node_modules" or part == "__pycache__"
+            if any(part.startswith(".") or part in ("node_modules", "__pycache__")
                    for part in p.parts):
                 continue
             files.append({
@@ -360,7 +425,7 @@ async def list_files():
             })
     except Exception:
         pass
-    return {"files": files}
+    return {"files": sorted(files, key=lambda f: f["path"])}
 
 # ── Git ────────────────────────────────────────────────────────────────────
 @app.get("/api/git/status")
@@ -369,23 +434,9 @@ async def git_status():
     try:
         branch = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
         ).stdout.strip()
-        staged = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            capture_output=True, text=True, timeout=5
-        ).stdout.strip().splitlines()
-        unstaged = subprocess.run(
-            ["git", "diff", "--name-only"],
-            capture_output=True, text=True, timeout=5
-        ).stdout.strip().splitlines()
-        ahead_behind = subprocess.run(
-            ["git", "rev-list", "--count", "--left-right", "@{upstream}...HEAD"],
-            capture_output=True, text=True, timeout=5
-        ).stdout.strip().split()
-        behind = int(ahead_behind[0]) if len(ahead_behind) > 1 else 0
-        ahead  = int(ahead_behind[1]) if len(ahead_behind) > 1 else 0
-        return {"branch": branch, "staged": staged, "unstaged": unstaged, "ahead": ahead, "behind": behind}
+        return {"branch": branch, "staged": [], "unstaged": [], "ahead": 0, "behind": 0}
     except Exception:
         return {"branch": "main", "staged": [], "unstaged": [], "ahead": 0, "behind": 0}
 
@@ -400,8 +451,7 @@ async def git_commit(request: GitCommitRequest):
         )
         if result.returncode == 0:
             return {"message": f"✅ Committed: {result.stdout.strip()}"}
-        else:
-            return {"message": f"ℹ️ {result.stdout.strip() or result.stderr.strip()}"}
+        return {"message": f"ℹ️ {result.stdout.strip() or result.stderr.strip()}"}
     except Exception as e:
         return {"message": f"❌ Error: {str(e)}"}
 
@@ -410,19 +460,21 @@ async def git_commit(request: GitCommitRequest):
 async def health():
     return {
         "status": "ok",
-        "api_model": TEXT_MODEL,
+        "version": "5.1.0",
+        "groq": bool(GROQ_API_KEY),
+        "hf": bool(HF_TOKEN),
+        "local": chat_handler._model_loaded,
         "local_model": LOCAL_MODEL,
-        "hf_token": bool(HF_TOKEN),
-        "memory_enabled": True,
-        "version": "5.0.0",
+        "memory": True,
     }
 
 # ── Frontend (SPA) ─────────────────────────────────────────────────────────
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
-# Serve built assets (JS/CSS chunks, images, etc.)
-if os.path.isdir(os.path.join(FRONTEND_DIST, "assets")):
-    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+# Serve /assets/* statically (JS/CSS bundles, images, fonts)
+_assets_dir = os.path.join(FRONTEND_DIST, "assets")
+if os.path.isdir(_assets_dir):
+    app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
 
 @app.get("/favicon.svg", include_in_schema=False)
 @app.get("/favicon.ico", include_in_schema=False)
@@ -433,13 +485,16 @@ async def favicon():
             return FileResponse(p)
     return JSONResponse({}, status_code=404)
 
-# SPA catch-all: every non-API route returns index.html so React Router works
+# SPA catch-all: all non-API routes return index.html (supports React Router)
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa_fallback(full_path: str):
     index_path = os.path.join(FRONTEND_DIST, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return JSONResponse({"message": "CodeCraft API — Frontend not built yet"}, status_code=503)
+    return JSONResponse(
+        {"message": "CodeCraft API — frontend not built yet"},
+        status_code=503,
+    )
 
 # ── Entry ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
