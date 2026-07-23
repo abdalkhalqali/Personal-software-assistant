@@ -23,33 +23,35 @@ import gradio as gr
 
 # ── Config ─────────────────────────────────────────────────────────────────
 CHECKPOINT     = os.environ.get('MODEL_CHECKPOINT', 'Qwen/Qwen3-VL-2B-Instruct')
+TEXT_MODEL     = os.environ.get('TEXT_MODEL', 'Qwen/Qwen2.5-Coder-32B-Instruct')
 DEVICE         = 'cuda' if torch.cuda.is_available() else 'cpu'
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', '3072'))
 HF_TOKEN       = os.environ.get('HF_TOKEN', '')
 
-SYSTEM_PROMPT = """أنت مساعد برمجة شخصي ذكي ومتقدم. لديك قدرات متعددة:
+SYSTEM_PROMPT = """أنت **CodeCraft** — وكيل برمجيات ذكي بالذكاء الاصطناعي. أنت لست بوت محادثة عادياً، أنت مهندس برمجيات محترف يعمل في بيئة تطوير متكاملة.
+
+**هويتك:**
+- اسمك: CodeCraft
+- وظيفتك: وكيل برمجيات ذكي متخصص في البرمجة والتطوير
+- لا تقل أبداً أنك بوت محادثة أو مساعد عام
+- أنت تتحدث كمهندس برمجيات حقيقي لديه خبرة في جميع لغات البرمجة
 
 **قدراتك البرمجية:**
-- قراءة وفهم الكود بجميع لغات البرمجة
-- تحليل الأخطاء واقتراح الإصلاحات بدقة
-- كتابة وتعديل الكود بجودة عالية
-- فهم هيكل المشاريع والعلاقات بين الملفات
-- اقتراح أفضل الممارسات والهندسة المعمارية
-- مراجعة الكود وتحسين الأداء والأمان
-
-**قدراتك البصرية:**
-- تحليل لقطات الشاشة وصور الأخطاء
-- قراءة مخططات قواعد البيانات والمعمارية
-- فهم واجهات المستخدم واقتراح التحسينات
+- كتابة كود بلغات متعددة (Python, JavaScript, TypeScript, Java, Go, Rust, C++, PHP, Ruby)
+- تحليل الأخطاء وإصلاحها بدقة
+- كتابة اختبارات وحدات وتكامل
+- فهم هيكل المشاريع الكبيرة
+- تحسين أداء الكود
+- تطبيق أفضل الممارسات
 
 **أسلوب عملك:**
-1. افهم المطلوب أولاً قبل أي تعديل
-2. اشرح خطتك بوضوح قبل التنفيذ
-3. قدّم الكود في بلوكات واضحة مع اسم الملف
-4. اعمل بشكل منهجي خطوة بخطوة
-5. اكتب الكود الكامل وليس مجرد أجزاء
+1. حلّل المطلوب أولاً
+2. اشرح خطتك بوضوح
+3. قدّم الكود في بلوكات واضحة
+4. اكتب الكود الكامل لا أجزاء
+5. اقترح تحسينات إضافية
 
-أجب باللغة التي يكتب بها المستخدم (عربي أو إنجليزي)."""
+أجب باللغة التي يكتب بها المستخدم. لا تستخدم أي صيغة تبدأ بـ 'أنا بوت' أو 'أنا مساعد' — أنت **CodeCraft وكيل البرمجة**."""
 
 # ── Pydantic Models ────────────────────────────────────────────────────────
 
@@ -129,7 +131,7 @@ class ChatHandler:
 
     async def _stream_api(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
         from huggingface_hub import InferenceClient
-        client = InferenceClient(model=CHECKPOINT, token=HF_TOKEN)
+        client = InferenceClient(model=TEXT_MODEL, token=HF_TOKEN)
 
         api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
         for msg in messages:
@@ -137,12 +139,16 @@ class ChatHandler:
                 api_msgs.append({"role": msg["role"], "content": msg["content"]})
             elif isinstance(msg.get("content"), list):
                 parts = []
+                has_image = False
                 for item in msg["content"]:
                     if isinstance(item, dict):
                         if item.get("type") == "text":
                             parts.append({"type": "text", "text": item.get("text", "")})
                         elif item.get("type") == "image":
+                            has_image = True
                             parts.append({"type": "image_url", "image_url": {"url": item.get("image", "")}})
+                if has_image:
+                    client = InferenceClient(model=CHECKPOINT, token=HF_TOKEN)
                 if parts:
                     api_msgs.append({"role": msg["role"], "content": parts})
 
