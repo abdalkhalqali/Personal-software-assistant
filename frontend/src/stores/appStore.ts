@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import type { Language } from '../i18n'
+import type { ThemeId } from '../lib/themes'
 
 export type AgentMode = 'architect' | 'developer' | 'debugger' | 'reviewer' | 'security' | 'teacher'
-export type ThemeMode = 'dark' | 'light'
 export type SidebarPanel = 'project' | 'agent' | 'memory' | 'terminal' | 'git' | 'model' | 'workspace' | null
 
 export interface Message {
@@ -100,6 +100,10 @@ interface AppState {
   fontSize: number
   setFontSize: (size: number) => void
 
+  // Theme
+  themeId: ThemeId
+  setThemeId: (theme: ThemeId) => void
+
   // Terminal
   terminalHistory: string[]
   addTerminalLine: (line: string) => void
@@ -176,6 +180,10 @@ export const useAppStore = create<AppState>((set) => ({
   setAutoSave: (save) => set({ autoSave: save }),
   fontSize: 14,
   setFontSize: (size) => set({ fontSize: size }),
+
+  // Theme
+  themeId: 'noon' as ThemeId,
+  setThemeId: (theme) => set({ themeId: theme }),
 
   // Terminal
   terminalHistory: ['$ System Ready | Personal AI Coding Agent v3.0'],

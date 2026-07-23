@@ -5,9 +5,10 @@ import { ChatArea } from './components/ChatArea'
 import { SmartInputBar } from './components/SmartInputBar'
 import { KeyboardShortcutsModal, useKeyboardShortcuts } from './components/KeyboardShortcuts'
 import { useAppStore } from './stores/appStore'
+import { applyTheme } from './lib/themes'
 
 export default function App() {
-  const { language } = useAppStore()
+  const { language, themeId } = useAppStore()
   useKeyboardShortcuts()
 
   // Initialize language direction
@@ -19,8 +20,13 @@ export default function App() {
       : 'AI Coding Agent — AI Programming Assistant'
   }, [language])
 
+  // Apply theme
+  useEffect(() => {
+    applyTheme(themeId)
+  }, [themeId])
+
   return (
-    <div className="h-screen flex flex-col bg-[var(--color-surface)] overflow-hidden">
+    <div className="h-screen flex flex-col bg-[var(--color-surface)] overflow-hidden transition-colors duration-500">
       {/* Top Navbar */}
       <TopNavbar />
 

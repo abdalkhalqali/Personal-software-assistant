@@ -1,8 +1,11 @@
 import { useAppStore } from '../stores/appStore'
 import { getTranslations } from '../i18n'
+import type { ThemeId } from '../lib/themes'
+import { themes } from '../lib/themes'
 import {
   Settings,
   Globe,
+  Palette,
   Key,
   Rocket,
   Save,
@@ -12,6 +15,7 @@ import {
 export function WorkspaceSettings() {
   const {
     language, setLanguage,
+    themeId, setThemeId,
     projectName, setProjectName,
     programmingLanguage, setProgrammingLanguage,
     framework, setFramework,
@@ -63,6 +67,55 @@ export function WorkspaceSettings() {
           </span>
         </div>
         <div className="space-y-2.5">
+          {/* Theme selector */}
+          <div>
+            <div className="flex items-center gap-1.5 mb-2">
+              <Palette size={13} className="text-[var(--color-pink)]" />
+              <span className="text-xs font-medium text-[var(--color-text-primary)]">
+                {language === 'ar' ? 'السمة اللونية' : 'Color Theme'}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {(Object.keys(themes) as ThemeId[]).map((id) => {
+                const th = themes[id]
+                return (
+                  <button
+                    key={id}
+                    onClick={() => setThemeId(id)}
+                    className={`relative p-2.5 rounded-xl text-xs transition-all duration-200 border overflow-hidden ${
+                      themeId === id
+                        ? 'ring-2 ring-[var(--color-accent)] border-transparent'
+                        : 'border-[var(--color-border-main)] hover:border-[var(--color-border-hover)]'
+                    }`}
+                    style={{
+                      background: `linear-gradient(135deg, ${th.surface3}, ${th.surface2})`,
+                    }}
+                  >
+                    {/* Color preview bar */}
+                    <div
+                      className="absolute top-0 left-0 right-0 h-1"
+                      style={{
+                        background: `linear-gradient(90deg, ${th.accent}, ${th.purple})`,
+                      }}
+                    />
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <span className="text-base">{th.emoji}</span>
+                      <span className="font-medium" style={{ color: th.textPrimary }}>
+                        {language === 'ar' ? th.name : th.nameEn}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 mt-1.5">
+                      <span className="w-3 h-3 rounded-full" style={{ background: th.accent }} />
+                      <span className="w-3 h-3 rounded-full" style={{ background: th.purple }} />
+                      <span className="w-3 h-3 rounded-full" style={{ background: th.pink }} />
+                      <span className="w-3 h-3 rounded-full" style={{ background: th.cyan }} />
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
           <Field label={t.workspace.projectName}>
             <input
               type="text"
