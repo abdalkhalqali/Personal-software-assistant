@@ -104,7 +104,7 @@ function EmptyState() {
           {suggestions.map((s, i) => (
             <button
               key={i}
-              className="glass text-right p-3 rounded-xl text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-glass-hover)] transition-all duration-200 border border-[var(--color-glass-border)]"
+              className="glass text-right p-3 rounded-xl text-sm text-[var(--color-text-primary)] hover:bg-[var(--color-glass-hover)] transition-all duration-200 border border-[var(--color-glass-border)]"
             >
               <span className="ml-2">{s.icon}</span>
               {s.text}
