@@ -1,58 +1,42 @@
 
 import gradio as gr
-import os
+import time
 
-custom_css = '''
+# CSS قسري لضمان ظهور النص باللون الأبيض مهما كانت الظروف
+css = """
 
-body { direction: rtl; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-.gradio-container { background: #0d1117; color: #c9d1d9; }
-.navbar {
-    background: rgba(22, 27, 34, 0.8);
-    backdrop-filter: blur(10px);
-    border-bottom: 1px solid #30363d;
-    padding: 10px 20px;
-    position: sticky; top: 0; z-index: 1000;
-}
-.sidebar {
-    background: #161b22;
-    border-left: 1px solid #30363d;
-    width: 300px;
-    transition: 0.3s;
-    overflow-y: auto;
-    padding: 15px;
-}
-.chat-area { flex-grow: 1; display: flex; flex-direction: column; padding: 20px; }
-.terminal-box { background: #000; color: #00ff00; font-family: 'Courier New', monospace; padding: 10px; border-radius: 5px; }
+body { direction: rtl; }
+.gradio-container { background-color: #0b0f19 !important; }
+#chatbot .message-wrap.user .message-body { background-color: #1a73e8 !important; color: white !important; border-radius: 15px; padding: 10px 15px; margin-left: 10px; text-align: right; }
+#chatbot .message-wrap.bot .message-body { background-color: #333 !important; color: white !important; border-radius: 15px; padding: 10px 15px; margin-right: 10px; text-align: right; }
+#chatbot .message-text { color: white !important; }
+#chatbot span { color: white !important; }
+#chatbot p { color: white !important; }
+input { color: white !important; }
 
-'''
+"""
 
-with gr.Blocks(css=custom_css, title="AI Coding Agent - Professional IDE") as demo:
-    with gr.Row(elem_classes="navbar"):
-        with gr.Column(scale=1):
-            gr.Markdown("### 🤖 وكيل البرمجة الذكي")
-        with gr.Column(scale=3):
-            with gr.Row():
-                gr.Button("💬 المحادثة", size="sm")
-                gr.Button("📄 الكود", size="sm")
-                gr.Button("📁 الملفات", size="sm")
-                gr.Button("📟 الطرفية", size="sm")
-        with gr.Column(scale=1):
-             gr.Markdown("🟢 متصل | v3.0")
+def respond(message, history):
+    bot_message = f"وعليكم السلام ورحمة الله وبركاته! أنا هنا لمساعدتك. لقد استلمت رسالتك: '{{message}}'. كيف يمكنني دعم مشروعك البرمجي اليوم؟"
+    print(f"DEBUG: Generated bot_message: {{bot_message}}") # Debug statement
+    history.append({{"role": "user", "content": message}})
+    history.append({{"role": "assistant", "content": ""}})
+    for i in range(len(bot_message)):
+        time.sleep(0.01)
+        history[-1]['content'] = bot_message[:i+1]
+        yield "", history
 
+with gr.Blocks(title="AI Nexus Assistant v5.6") as demo:
+    gr.Markdown("<h1 style='text-align:center; color:white;'>🚀 AI Nexus Assistant v5.6</h1>")
+
+    # Removed 'type="messages"' as it causes TypeError
+    chatbot = gr.Chatbot(elem_id="chatbot", height=550, render_markdown=True)
     with gr.Row():
-        with gr.Column(scale=4, elem_classes="chat-area"):
-            chatbot = gr.Chatbot(label="مهندس البرمجيات الذكي", height=600, show_label=False)
-            with gr.Row():
-                msg = gr.Textbox(placeholder="اكتب طلبك هنا...", scale=9, show_label=False)
-                submit_btn = gr.Button("إرسال", scale=1, variant="primary")
+        msg = gr.Textbox(placeholder="اكتب هنا...", scale=9, container=False)
+        submit = gr.Button("إرسال", scale=1, variant="primary")
 
-        with gr.Column(scale=1, elem_classes="sidebar"):
-            with gr.Accordion("📂 مستكشف المشروع", open=True):
-                gr.FileExplorer(root_dir=".", label="الملفات")
-            with gr.Accordion("🧠 التحكم", open=False):
-                gr.Radio(["Architect", "Developer"], label="الوضع")
-            with gr.Accordion("📟 الطرفية", open=False):
-                gr.Code("$ echo 'System Ready'", language="shell", elem_classes="terminal-box")
+    msg.submit(respond, [msg, chatbot], [msg, chatbot])
+    submit.click(respond, [msg, chatbot], [msg, chatbot])
 
 if __name__ == '__main__':
-    demo.launch(share=True)
+    demo.launch(share=True, css=css)

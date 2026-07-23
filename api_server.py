@@ -7,7 +7,6 @@ Fixed: sync iterators no longer block the asyncio event loop;
 import os
 import json
 import uuid
-import asyncio
 import threading
 import time
 import queue as queue_module
@@ -171,9 +170,22 @@ class ChatHandler:
         if HF_TOKEN:
             providers_available += 1
             try:
-                async for chunk in self._stream_hf_api(messages, max_tokens):
-                    yield chunk
-                return
+                import torch
+                cpu_count = os.cpu_count() or 2
+                torch.set_num_threads(max(1, cpu_count - 1))
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                self.local_tokenizer = AutoTokenizer.from_pretrained(
+                    LOCAL_MODEL, trust_remote_code=True
+                )
+                self.local_model = AutoModelForCausalLM.from_pretrained(
+                    LOCAL_MODEL,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
+                    low_cpu_mem_usage=True,
+                )
+                self.local_model.eval()
+                self._model_loaded = True
+                print(f"[CodeCraft] ✅ Local model ready in {time.time()-t0:.1f}s")
             except Exception as e:
                 print(f"[CodeCraft] ❌ HF API: {e}")
                 yield self._sse({"note": "🔄 Trying backup..."})
@@ -328,7 +340,6 @@ class ChatHandler:
     def _sse(data: dict) -> str:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-
 chat_handler = ChatHandler()
 
 # ── Lifespan ───────────────────────────────────────────────────────────────
@@ -384,18 +395,10 @@ async def chat(request: ChatRequest):
             yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    return StreamingResponse(generate(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-# ── Memory ─────────────────────────────────────────────────────────────────
+# ── Other Endpoints ────────────────────────────────────────────────────────
 @app.delete("/api/memory/{session_id}")
 async def clear_memory(session_id: str):
     memory.clear_session(session_id)
@@ -405,7 +408,6 @@ async def clear_memory(session_id: str):
 async def get_memory(session_id: str):
     return {"history": memory.get_history(session_id)}
 
-# ── Terminal ───────────────────────────────────────────────────────────────
 @app.post("/api/terminal")
 async def terminal(request: TerminalRequest):
     import subprocess
@@ -419,7 +421,6 @@ async def terminal(request: TerminalRequest):
     except Exception as e:
         return {"error": str(e)}
 
-# ── Files ──────────────────────────────────────────────────────────────────
 @app.get("/api/files")
 async def list_files():
     import pathlib
@@ -439,7 +440,6 @@ async def list_files():
         pass
     return {"files": sorted(files, key=lambda f: f["path"])}
 
-# ── Git ────────────────────────────────────────────────────────────────────
 @app.get("/api/git/status")
 async def git_status():
     import subprocess
@@ -467,7 +467,6 @@ async def git_commit(request: GitCommitRequest):
     except Exception as e:
         return {"message": f"❌ Error: {str(e)}"}
 
-# ── Health ─────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
     return {
@@ -508,9 +507,7 @@ async def spa_fallback(full_path: str):
         status_code=503,
     )
 
-# ── Entry ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "7860"))
-    print(f"[CodeCraft] Starting on 0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
