@@ -36,6 +36,37 @@
   --animate-slide-right: slideRight 0.3s ease-out;
 }
 
+/* ⭐ IMPORTANT: Explicit CSS custom properties for runtime theming
+   Tailwind v4 @theme does NOT generate CSS variables accessible via var().
+   These :root definitions ensure all text and background colors work.
+   The applyTheme() JS function overrides these dynamically. */
+:root {
+  --color-glass: rgba(255, 255, 255, 0.08);
+  --color-glass-border: rgba(255, 255, 255, 0.12);
+  --color-glass-hover: rgba(255, 255, 255, 0.14);
+  --color-surface: #0d1117;
+  --color-surface-2: #161b22;
+  --color-surface-3: #1c2333;
+  --color-surface-4: #21262d;
+  --color-border-main: #30363d;
+  --color-border-hover: #484f58;
+  --color-text-primary: #e6edf3;
+  --color-text-secondary: #8b949e;
+  --color-text-muted: #6e7681;
+  --color-accent: #58a6ff;
+  --color-accent-hover: #79c0ff;
+  --color-accent-bg: rgba(88, 166, 255, 0.12);
+  --color-success: #3fb950;
+  --color-warning: #d29922;
+  --color-danger: #f85149;
+  --color-danger-bg: rgba(248, 81, 73, 0.12);
+  --color-purple: #bc8cff;
+  --color-pink: #f778ba;
+  --color-cyan: #39d2c0;
+  --color-code-bg: #1c2333;
+  --color-terminal-bg: #0a0e14;
+}
+
 @keyframes glow {
   from { box-shadow: 0 0 10px -3px var(--color-accent); }
   to { box-shadow: 0 0 20px -3px var(--color-accent); }
