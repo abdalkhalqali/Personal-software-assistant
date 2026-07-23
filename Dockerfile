@@ -1,43 +1,58 @@
-FROM python:3.10-slim
+FROM python:3.13-slim AS root
 
 WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    libsm6 \
+    libxext6 \
     curl \
     git \
-    && rm -rf /var/lib/apt/lists/*
+    git-lfs \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install
 
-# Install Node.js for building the React frontend
+# Install Node.js 20 for building the React frontend
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Bun
+# Install Bun for frontend builds
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
-# Copy dependency files first for better caching
-COPY requirements_web_demo.txt .
-COPY requirements.txt .
-COPY frontend/package.json frontend/bun.lock /app/frontend/
+# Copy dependency files
+COPY frontend/package.json frontend/bun.lock* /app/frontend/
+COPY requirements.txt requirements_web_demo.txt /app/
 
 # Install Python dependencies
-RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir fastapi uvicorn \
-    && pip install --no-cache-dir -r requirements_web_demo.txt \
-    && pip install --no-cache-dir qwen-vl-utils
+RUN pip install --no-cache-dir -U pip && \
+    pip install --no-cache-dir \
+    torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements_web_demo.txt && \
+    pip install --no-cache-dir fastapi uvicorn spaces
 
-# Install frontend dependencies and build
+# Install and build frontend
 COPY frontend/ /app/frontend/
-RUN cd /app/frontend && bun install && bun run build
+RUN cd /app/frontend && \
+    bun install && \
+    bun run build
 
 # Copy the rest of the project
 COPY . /app/
 
-# Expose the port Hugging Face expects
+# Clean up frontend source to save space, keep only dist/
+RUN rm -rf /app/frontend/src /app/frontend/node_modules
+
+# Expose port
 EXPOSE 7860
 
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:7860/ || exit 1
+
 # Run the API server
+ENV PYTHONUNBUFFERED=1
 CMD ["python", "api_server.py"]
