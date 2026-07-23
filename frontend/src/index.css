@@ -1,0 +1,268 @@
+@import "tailwindcss";
+
+@theme {
+  --color-glass: rgba(255, 255, 255, 0.08);
+  --color-glass-border: rgba(255, 255, 255, 0.12);
+  --color-glass-hover: rgba(255, 255, 255, 0.14);
+  --color-surface: #0d1117;
+  --color-surface-2: #161b22;
+  --color-surface-3: #1c2333;
+  --color-surface-4: #21262d;
+  --color-border-main: #30363d;
+  --color-border-hover: #484f58;
+  --color-text-primary: #e6edf3;
+  --color-text-secondary: #8b949e;
+  --color-text-muted: #6e7681;
+  --color-accent: #58a6ff;
+  --color-accent-hover: #79c0ff;
+  --color-accent-bg: rgba(88, 166, 255, 0.12);
+  --color-success: #3fb950;
+  --color-warning: #d29922;
+  --color-danger: #f85149;
+  --color-danger-bg: rgba(248, 81, 73, 0.12);
+  --color-purple: #bc8cff;
+  --color-pink: #f778ba;
+  --color-cyan: #39d2c0;
+  --color-code-bg: #1c2333;
+  --color-terminal-bg: #0a0e14;
+  --font-sans: 'Segoe UI', 'Tahoma', 'Geneva', 'Verdana', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Consolas', 'Monaco', 'Courier New', monospace;
+  --font-arabic: 'Tahoma', 'Segoe UI', 'Arial', sans-serif;
+  --animate-glow: glow 2s ease-in-out infinite alternate;
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-shimmer: shimmer 3s ease-in-out infinite;
+  --animate-fade-in: fadeIn 0.3s ease-out;
+  --animate-slide-up: slideUp 0.3s ease-out;
+  --animate-slide-right: slideRight 0.3s ease-out;
+}
+
+@keyframes glow {
+  from { box-shadow: 0 0 10px -3px var(--color-accent); }
+  to { box-shadow: 0 0 20px -3px var(--color-accent); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideRight {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/*
+  The default border color has changed to `currentColor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything can
+  still work as expected with the existing border utilities.
+*/
+*,
+::after,
+::before {
+  border-color: var(--color-border-main);
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  direction: rtl;
+  overflow: hidden;
+  height: 100vh;
+}
+
+body[dir="ltr"] {
+  direction: ltr;
+}
+
+#root {
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Glassmorphism utility */
+.glass {
+  background: var(--color-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--color-glass-border);
+}
+
+.glass-strong {
+  background: rgba(22, 27, 34, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--color-border-main);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-main);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-hover);
+}
+
+/* Code block styling */
+pre {
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: embed;
+}
+
+.code-block-wrapper {
+  direction: ltr;
+  text-align: left;
+}
+
+/* Markdown content */
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  margin-top: 1.2em;
+  margin-bottom: 0.6em;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.markdown-content h1 { font-size: 1.5rem; }
+.markdown-content h2 { font-size: 1.3rem; }
+.markdown-content h3 { font-size: 1.15rem; }
+.markdown-content h4 { font-size: 1.05rem; }
+
+.markdown-content p {
+  margin: 0.6em 0;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin: 0.6em 0;
+  padding-inline-start: 1.5em;
+}
+
+.markdown-content li {
+  margin: 0.3em 0;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.markdown-content blockquote {
+  border-inline-start: 3px solid var(--color-accent);
+  margin: 0.8em 0;
+  padding: 0.5em 1em;
+  background: rgba(88, 166, 255, 0.05);
+  border-radius: 0 6px 6px 0;
+  color: var(--color-text-secondary);
+}
+
+.markdown-content table {
+  border-collapse: collapse;
+  margin: 1em 0;
+  width: 100%;
+  direction: ltr;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid var(--color-border-main);
+  padding: 0.5em 0.8em;
+  text-align: start;
+}
+
+.markdown-content th {
+  background: var(--color-surface-3);
+  font-weight: 600;
+}
+
+.markdown-content a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  text-decoration: underline;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid var(--color-border-main);
+  margin: 1.5em 0;
+}
+
+/* Terminal animation */
+.terminal-cursor::after {
+  content: '▊';
+  animation: blink 1s step-end infinite;
+  color: var(--color-success);
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* Sidebar transition */
+.sidebar-panel {
+  overflow: hidden;
+  transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+}
+
+.sidebar-panel.open {
+  max-height: 1000px;
+  opacity: 1;
+}
+
+.sidebar-panel.closed {
+  max-height: 0px;
+  opacity: 0;
+}
+
+/* Message animation */
+.message-enter {
+  animation: slideUp 0.3s ease-out;
+}
+
+/* Typing indicator */
+.typing-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  margin: 0 2px;
+}
+
+.typing-dot:nth-child(1) { animation: typingBounce 1.4s ease-in-out 0s infinite; }
+.typing-dot:nth-child(2) { animation: typingBounce 1.4s ease-in-out 0.2s infinite; }
+.typing-dot:nth-child(3) { animation: typingBounce 1.4s ease-in-out 0.4s infinite; }
+
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-6px); }
+}
