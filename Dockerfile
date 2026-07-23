@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     curl \
+    unzip \
     git \
     git-lfs \
     && rm -rf /var/lib/apt/lists/* \
