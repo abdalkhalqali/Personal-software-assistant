@@ -1,27 +1,36 @@
 ---
-title: مساعد البرمجة الشخصي
+title: وكيل البرمجة الذكي
 emoji: 🤖
-colorFrom: blue
-colorTo: indigo
-sdk: gradio
-sdk_version: 5.49.1
-app_file: app.py
+colorFrom: pink
+colorTo: purple
+sdk: docker
 pinned: false
 ---
 
-# 🤖 مساعد البرمجة الشخصي — Qwen3-VL
+# 🤖 وكيل البرمجة الذكي — AI Coding Agent
 
-مساعد برمجة شخصي مدعوم بنموذج Qwen3-VL-2B-Instruct.
+واجهة احترافية لوكيل برمجة بالذكاء الاصطناعي، مع محادثة ذكية، لوحة جانبية متعددة الأقسام، ودعم اللغة العربية والإنجليزية.
 
 ## القدرات
-- تحليل الكود وإصلاح الأخطاء
-- قراءة الصور ولقطات الشاشة
-- ربط مستودعات GitHub وقراءة ورفع الملفات
-- يتحدث العربية والإنجليزية
+- 💬 **محادثة ذكية** مع دعم Markdown وعرض الأكواد
+- 📁 **مستكشف المشروع** — عرض الملفات والمجلدات
+- 🧠 **التحكم في الوكيل** — 6 أوضاع: مهندس معماري، مطور، مصحح، مراجع، أمان، معلم
+- 📟 **طرفية مدمجة** — تنفيذ أوامر النظام
+- 🔗 **إدارة Git** — Commit, Push, Pull, Branch
+- 🎨 **4 سمات لونية رومانسية** — ورود، شفق، فجر، ساكورا
+- 🌐 ** Arabic / English** — تبديل اللغة من الإعدادات
 
 ## وضع التشغيل
-1. **HF Inference API** (أولاً) — مجاني بلا حدود يومية
+1. **HF Inference API** (أولاً) — يستخدم `HF_TOKEN`
 2. **CPU محلي** (احتياطي) — يعمل دائماً
 
 ## المتغيرات المطلوبة
-- `HF_TOKEN` — توكن Hugging Face لتفعيل الـ Inference API
+- `HF_TOKEN` — توكن Hugging Face API
+- `MODEL_CHECKPOINT` — (اختياري) اسم النموذج
+
+## البنية
+```
+api_server.py   ← FastAPI backend (port 7860)
+frontend/       ← React + Vite + TypeScript UI
+Dockerfile      ← Hugging Face Docker Space
+```
