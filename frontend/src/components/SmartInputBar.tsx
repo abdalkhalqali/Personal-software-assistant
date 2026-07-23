@@ -12,7 +12,8 @@ import {
 import { cn } from '../lib/utils'
 
 export function SmartInputBar() {
-  const { language, addMessage, setStreaming, updateMessage, messages, agentMode } = useAppStore()
+  const store = useAppStore()
+  const { language, addMessage, setStreaming, updateMessage, agentMode } = store
   const t = getTranslations(language)
   const [input, setInput] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
@@ -25,6 +26,9 @@ export function SmartInputBar() {
     setInput('')
     setIsProcessing(true)
     setStreaming(true)
+
+    // Get the LATEST messages from store for the API call
+    const currentMessages = useAppStore.getState().messages
 
     // Add user message
     const userMsg = {
@@ -49,19 +53,26 @@ export function SmartInputBar() {
     let fullText = ''
 
     await sendMessage(
-      [...messages, userMsg],
+      [...currentMessages, userMsg],
       (token) => {
         fullText += token
         updateMessage(assistantId, { content: fullText })
       },
       (text) => {
-        updateMessage(assistantId, { content: text, isStreaming: false })
+        // If response is empty, show a fallback message
+        const finalContent = text || (language === 'ar'
+          ? '⚠️ لم يتم استلام رد. يرجى التأكد من تكوين مفتاح API (GROQ_API_KEY أو HF_TOKEN).'
+          : '⚠️ No response received. Please ensure an API key (GROQ_API_KEY or HF_TOKEN) is configured.')
+        updateMessage(assistantId, { content: finalContent, isStreaming: false })
         setIsProcessing(false)
         setStreaming(false)
       },
       (error) => {
+        const errorMessage = language === 'ar'
+          ? `❌ **خطأ في الاتصال:** ${error}\n\n${t.chat.retry}`
+          : `❌ **Connection error:** ${error}\n\n${t.chat.retry}`
         updateMessage(assistantId, {
-          content: `❌ **خطأ:** ${error}\n\n${t.chat.retry}`,
+          content: errorMessage,
           isStreaming: false,
         })
         setIsProcessing(false)

@@ -9,93 +9,102 @@ export async function sendMessage(
   onError: (error: string) => void,
 ) {
   const store = useAppStore.getState()
+  let fullText = ''
+
   try {
-    const response = await fetch(`${API_BASE}/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-        })),
-        mode: store.agentMode,
-        temperature: store.temperature,
-        max_tokens: store.maxTokens,
-      }),
-    })
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 60000) // 60s overall timeout
 
-    if (!response.ok) {
-      const err = await response.text()
-      onError(err)
-      return
-    }
+    try {
+      const response = await fetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+          mode: store.agentMode,
+          temperature: store.temperature,
+          max_tokens: store.maxTokens,
+        }),
+        signal: controller.signal,
+      })
 
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
+      clearTimeout(timeoutId)
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let fullText = ''
-    // Buffer to handle SSE lines split across multiple network chunks
-    let buffer = ''
+      if (!response.ok) {
+        const err = await response.text()
+        onError(err)
+        return
+      }
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
+      // Read the entire response as text - avoids proxy streaming issues
+      const text = await response.text()
 
-      buffer += decoder.decode(value, { stream: true })
-      // Split on newlines but keep the last incomplete line in buffer
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
+      // Parse SSE events from the full text
+      let sseBuffer = ''
+      for (const ch of text) {
+        sseBuffer += ch
+        if (sseBuffer.endsWith('\n\n')) {
+          // We have a complete SSE event
+          const lines = sseBuffer.trim().split('\n')
+          sseBuffer = ''
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
+          for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed.startsWith('data: ')) continue
 
-        const data = line.slice(6).trim()
+            const data = trimmed.slice(6).trim()
+            if (data === '[DONE]') {
+              onDone(fullText)
+              return
+            }
 
-        if (data === '[DONE]') {
-          onDone(fullText)
-          return
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.token) {
+                fullText += parsed.token
+                onToken(parsed.token)
+              }
+              if (parsed.done) {
+                onDone(fullText)
+                return
+              }
+              if (parsed.error) {
+                onError(parsed.error)
+                return
+              }
+            } catch {
+              // Skip malformed JSON
+            }
+          }
         }
+      }
 
+      // Process any remaining data in buffer
+      if (sseBuffer.trim().startsWith('data: ')) {
         try {
-          const parsed = JSON.parse(data)
+          const parsed = JSON.parse(sseBuffer.trim().slice(6).trim())
           if (parsed.token) {
             fullText += parsed.token
             onToken(parsed.token)
           }
-          if (parsed.done) {
-            onDone(fullText)
-            return
-          }
-          if (parsed.error) {
-            onError(parsed.error)
-            return
-          }
         } catch {
-          // Skip malformed JSON (incomplete chunk — will be retried in next iteration)
+          // ignore
         }
       }
-    }
 
-    // Flush any remaining buffered data
-    if (buffer.startsWith('data: ')) {
-      try {
-        const parsed = JSON.parse(buffer.slice(6).trim())
-        if (parsed.token) {
-          fullText += parsed.token
-          onToken(parsed.token)
-        }
-      } catch {
-        // ignore
-      }
+      onDone(fullText)
+    } finally {
+      clearTimeout(timeoutId)
     }
-
-    onDone(fullText)
   } catch (err: any) {
-    onError(err.message || 'Connection error')
+    if (err.name === 'AbortError') {
+      onDone(fullText)
+    } else {
+      onError(err.message || 'Connection error')
+    }
   }
 }
 

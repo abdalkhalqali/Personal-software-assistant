@@ -15,6 +15,18 @@ from typing import AsyncGenerator, List, Dict, Optional
 from contextlib import asynccontextmanager
 from collections import defaultdict
 
+# Load .env.local if it exists
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env.local')
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _key, _val = _line.split('=', 1)
+                _val = _val.strip('"\'')
+                if _key not in os.environ:
+                    os.environ[_key] = _val
+
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles

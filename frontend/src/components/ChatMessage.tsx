@@ -1,15 +1,9 @@
-import { useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import type { Message, CodeBlock } from '../stores/appStore'
 import { useAppStore } from '../stores/appStore'
 import { getTranslations } from '../i18n'
-import { cn, getLanguageFromExtension } from '../lib/utils'
+import { cn } from '../lib/utils'
 import {
-  Copy,
-  Check,
   FileCode,
-  X,
   User,
   Bot,
 } from 'lucide-react'
@@ -56,40 +50,10 @@ export function ChatMessage({ message, codeBlocks = [] }: Props) {
           {isUser ? '' : '🧠 ' + t.app.title}
         </div>
 
-        {/* Message text with Markdown */}
+        {/* Message text - render as plain text with inline styles for reliability */}
         {message.content && (
-          <div className="markdown-content text-sm leading-relaxed">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                code({ className, children, ...props }) {
-                  const match = /language-(\w+)/.exec(className || '')
-                  const isInline = !match
-                  const code = String(children).replace(/\n$/, '')
-
-                  if (isInline) {
-                    return (
-                      <code
-                        className="px-1.5 py-0.5 rounded bg-[var(--color-code-bg)] text-[var(--color-cyan)] text-[13px] font-mono"
-                        {...props}
-                      >
-                        {children}
-                      </code>
-                    )
-                  }
-
-                  return (
-                    <CodeBlockRenderer
-                      language={match ? match[1] : ''}
-                      code={code}
-                    />
-                  )
-                },
-                pre({ children }) {
-                  return <>{children}</>
-                },
-              }}
-            />
+          <div style={{ color: '#e6edf3', fontSize: '14px', lineHeight: '1.7', whiteSpace: 'pre-wrap', wordBreak: 'break-word', backgroundColor: 'rgba(255,255,255,0.05)', padding: '8px 12px', borderRadius: '8px' }}>
+            {message.content}
           </div>
         )}
 
@@ -110,65 +74,6 @@ export function ChatMessage({ message, codeBlocks = [] }: Props) {
           <CodeBlockCard key={block.id} block={block} />
         ))}
       </div>
-    </div>
-  )
-}
-
-function CodeBlockRenderer({
-  language,
-  code,
-}: {
-  language: string
-  code: string
-}) {
-  const { language: lang } = useAppStore()
-  const t = getTranslations(lang)
-  const [copied, setCopied] = useState(false)
-
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(code)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-
-  const displayLang = language || getLanguageFromExtension('')
-
-  return (
-    <div className="my-3 rounded-xl overflow-hidden border border-[var(--color-border-main)] bg-[var(--color-code-bg)]">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 bg-[var(--color-surface-3)] border-b border-[var(--color-border-main)]">
-        <div className="flex items-center gap-2">
-          <FileCode size={14} className="text-[var(--color-text-muted)]" />
-          <span className="text-xs font-mono text-[var(--color-text-muted)]">
-            {displayLang}
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={handleCopy}
-            className="p-1.5 rounded-md hover:bg-[var(--color-glass-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-all"
-            title={t.chat.copyCode}
-          >
-            {copied ? <Check size={14} /> : <Copy size={14} />}
-          </button>
-          <button
-            className="p-1.5 rounded-md hover:bg-[var(--color-accent-bg)] text-[var(--color-accent)] transition-all"
-            title={t.chat.applyEdit}
-          >
-            <FileCode size={14} />
-          </button>
-          <button
-            className="p-1.5 rounded-md hover:bg-[var(--color-danger-bg)] text-[var(--color-danger)] transition-all"
-            title={t.chat.rejectEdit}
-          >
-            <X size={14} />
-          </button>
-        </div>
-      </div>
-      {/* Code */}
-      <pre className="p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[var(--color-text-primary)]">
-        <code>{code}</code>
-      </pre>
     </div>
   )
 }
