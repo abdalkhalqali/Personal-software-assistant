@@ -38,37 +38,61 @@ export async function sendMessage(
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let fullText = ''
+    // Buffer to handle SSE lines split across multiple network chunks
+    let buffer = ''
 
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
 
-      const chunk = decoder.decode(value, { stream: true })
-      const lines = chunk.split('\n')
+      buffer += decoder.decode(value, { stream: true })
+      // Split on newlines but keep the last incomplete line in buffer
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
 
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6)
-          if (data === '[DONE]') {
+        if (!line.startsWith('data: ')) continue
+
+        const data = line.slice(6).trim()
+
+        if (data === '[DONE]') {
+          onDone(fullText)
+          return
+        }
+
+        try {
+          const parsed = JSON.parse(data)
+          if (parsed.token) {
+            fullText += parsed.token
+            onToken(parsed.token)
+          }
+          if (parsed.done) {
             onDone(fullText)
             return
           }
-          try {
-            const parsed = JSON.parse(data)
-            if (parsed.token) {
-              fullText += parsed.token
-              onToken(parsed.token)
-            }
-            if (parsed.error) {
-              onError(parsed.error)
-              return
-            }
-          } catch {
-            // Skip malformed JSON
+          if (parsed.error) {
+            onError(parsed.error)
+            return
           }
+        } catch {
+          // Skip malformed JSON (incomplete chunk — will be retried in next iteration)
         }
       }
     }
+
+    // Flush any remaining buffered data
+    if (buffer.startsWith('data: ')) {
+      try {
+        const parsed = JSON.parse(buffer.slice(6).trim())
+        if (parsed.token) {
+          fullText += parsed.token
+          onToken(parsed.token)
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     onDone(fullText)
   } catch (err: any) {
     onError(err.message || 'Connection error')

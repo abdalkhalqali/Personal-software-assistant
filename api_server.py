@@ -1,27 +1,28 @@
 """
 CodeCraft — AI Coding Agent
 Uses HuggingFace Inference API (fast, free) with local model fallback.
-Fixes streaming format to match frontend SSE expectations.
+Fixed: async/sync blocking issues + proper SSE streaming.
 """
 import os
 import json
 import uuid
 import asyncio
 import threading
-import time
+import queue as queue_module
 from typing import AsyncGenerator, Dict, List
 from contextlib import asynccontextmanager
 from collections import defaultdict
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ── Config ─────────────────────────────────────────────────────────────────
-TEXT_MODEL = os.environ.get('TEXT_MODEL', 'Qwen/Qwen2.5-Coder-32B-Instruct')
+TEXT_MODEL  = os.environ.get('TEXT_MODEL',  'Qwen/Qwen2.5-Coder-32B-Instruct')
 LOCAL_MODEL = os.environ.get('LOCAL_MODEL', 'Qwen/Qwen3-1.7B-Instruct')
-HF_TOKEN = os.environ.get('HF_TOKEN', '')
+HF_TOKEN    = os.environ.get('HF_TOKEN', '')
 MAX_NEW_TOKENS = 2048
 MAX_CONVERSATION_HISTORY = 20
 
@@ -109,7 +110,6 @@ class ChatHandler:
 
     async def chat_stream(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
         """Try HF API first, fallback to local model."""
-        # Try HF Inference API first (fast, free with rate limits)
         if HF_TOKEN:
             try:
                 async for chunk in self._stream_hf_api(messages, max_tokens):
@@ -117,18 +117,19 @@ class ChatHandler:
                 return
             except Exception as e:
                 print(f"[CodeCraft] HF API failed: {e}")
-                yield self._sse({"token": f"\n⚠️ API unavailable, using local model...\n"})
+                yield self._sse({"token": f"\n⚠️ API unavailable, switching to local model...\n"})
 
-        # Fallback to local model (slower but free)
+        # Fallback to local model
         try:
             async for chunk in self._stream_local(messages, temperature, max_tokens):
                 yield chunk
         except Exception as e:
-            yield self._sse({"token": f"\n❌ Error: {str(e)}\n"})
+            yield self._sse({"error": str(e)})
 
     async def _stream_hf_api(self, messages: list, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream from HuggingFace Inference API."""
+        """Stream from HuggingFace Inference API — runs sync client in thread pool."""
         from huggingface_hub import InferenceClient
+
         client = InferenceClient(model=TEXT_MODEL, token=HF_TOKEN)
 
         api_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -148,22 +149,44 @@ class ChatHandler:
                 if parts:
                     api_msgs.append({"role": role, "content": parts})
 
-        stream = client.chat_completion(
-            messages=api_msgs,
-            max_tokens=max_tokens,
-            temperature=0.7,
-            stream=True,
-        )
+        # Use a thread-safe queue so the sync HF iterator runs in a thread
+        # and does NOT block the asyncio event loop.
+        q: queue_module.Queue = queue_module.Queue()
+        loop = asyncio.get_event_loop()
 
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
-            if delta:
-                yield self._sse({"token": delta})
+        def _fetch_sync():
+            try:
+                stream = client.chat_completion(
+                    messages=api_msgs,
+                    max_tokens=max_tokens,
+                    temperature=0.7,
+                    stream=True,
+                )
+                for chunk in stream:
+                    delta = chunk.choices[0].delta.content or ""
+                    if delta:
+                        q.put(delta)
+            except Exception as e:
+                q.put(e)
+            finally:
+                q.put(None)  # sentinel
+
+        thread = threading.Thread(target=_fetch_sync, daemon=True)
+        thread.start()
+
+        while True:
+            # run_in_executor lets us await a blocking q.get() without
+            # stalling the event loop for other requests
+            token = await loop.run_in_executor(None, q.get)
+            if token is None:
+                break
+            if isinstance(token, Exception):
+                raise token
+            yield self._sse({"token": token})
 
     async def _stream_local(self, messages: list, temperature: float, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream from local model."""
+        """Stream from local model — runs generation in background thread."""
         import torch
-        import queue
 
         self.load_local()
 
@@ -174,7 +197,8 @@ class ChatHandler:
             if isinstance(content, str) and content.strip():
                 api_msgs.append({"role": role, "content": content})
 
-        q = queue.Queue()
+        q: queue_module.Queue = queue_module.Queue()
+        loop = asyncio.get_event_loop()
 
         def _generate():
             try:
@@ -184,7 +208,9 @@ class ChatHandler:
                 inputs = self.local_tokenizer(text, return_tensors="pt").to(self.local_model.device)
 
                 from transformers import TextIteratorStreamer
-                streamer = TextIteratorStreamer(self.local_tokenizer, skip_prompt=True, skip_special_tokens=True)
+                streamer = TextIteratorStreamer(
+                    self.local_tokenizer, skip_prompt=True, skip_special_tokens=True
+                )
 
                 gen_kwargs = {
                     **inputs,
@@ -195,30 +221,33 @@ class ChatHandler:
                     "streamer": streamer,
                 }
 
-                thread = threading.Thread(target=self.local_model.generate, kwargs=gen_kwargs, daemon=True)
-                thread.start()
+                gen_thread = threading.Thread(
+                    target=self.local_model.generate, kwargs=gen_kwargs, daemon=True
+                )
+                gen_thread.start()
 
                 for chunk in streamer:
                     if chunk:
                         q.put(chunk)
                 q.put(None)
             except Exception as e:
-                q.put(f"Error: {str(e)}")
+                q.put(e)
                 q.put(None)
 
-        thread = threading.Thread(target=_generate, daemon=True)
-        thread.start()
+        threading.Thread(target=_generate, daemon=True).start()
 
         while True:
-            token = q.get()
+            # Non-blocking await — runs q.get() in executor thread
+            token = await loop.run_in_executor(None, q.get)
             if token is None:
                 break
+            if isinstance(token, Exception):
+                raise token
             yield self._sse({"token": token})
 
     @staticmethod
     def _sse(data: dict) -> str:
-        """Format as Server-Sent Event."""
-        return f"data: {json.dumps(data)}\n\n"
+        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 chat_handler = ChatHandler()
@@ -229,17 +258,16 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
     print("🧠 CodeCraft — AI Coding Agent")
     print("=" * 60)
-    print(f"API Model: {TEXT_MODEL}")
-    print(f"Local Fallback: {LOCAL_MODEL}")
-    print(f"HF Token: {'✅ Set' if HF_TOKEN else '❌ Not set (local only)'}")
+    print(f"API Model   : {TEXT_MODEL}")
+    print(f"Local Model : {LOCAL_MODEL}")
+    print(f"HF Token    : {'✅ Set' if HF_TOKEN else '❌ Not set (local only)'}")
     print("=" * 60)
-    # Pre-load local model in background
     threading.Thread(target=chat_handler.load_local, daemon=True).start()
     yield
     print("[CodeCraft] Shutting down...")
 
 # ── FastAPI App ────────────────────────────────────────────────────────────
-app = FastAPI(title="CodeCraft API", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="CodeCraft API", version="5.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -255,14 +283,12 @@ async def chat(request: ChatRequest):
     """Streaming chat endpoint with conversation memory."""
     session_id = request.session_id or str(uuid.uuid4())
 
-    # Add user messages to memory
     for msg in request.messages:
         if msg.get("role") == "user":
             content = msg.get("content", "")
             if isinstance(content, str):
                 memory.add_message(session_id, "user", content)
 
-    # Get full conversation history
     history = memory.get_history(session_id)
 
     async def generate():
@@ -270,20 +296,17 @@ async def chat(request: ChatRequest):
         try:
             async for sse_chunk in chat_handler.chat_stream(history, request.temperature, request.max_tokens):
                 yield sse_chunk
-                # Extract token for memory
-                if "data: " in sse_chunk:
-                    try:
-                        data = json.loads(sse_chunk.replace("data: ", "").strip())
-                        if data.get("token"):
-                            full_response += data["token"]
-                    except:
-                        pass
+                try:
+                    raw = sse_chunk.removeprefix("data: ").strip()
+                    data = json.loads(raw)
+                    if data.get("token"):
+                        full_response += data["token"]
+                except Exception:
+                    pass
 
-            # Save assistant response to memory
             if full_response:
                 memory.add_message(session_id, "assistant", full_response)
 
-            # Send done signal with session_id
             yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
 
         except Exception as e:
@@ -305,52 +328,65 @@ async def clear_memory(session_id: str):
     memory.clear_session(session_id)
     return {"message": "Memory cleared"}
 
-@app.get("/api/memory/{session_id}")
-async def get_memory(session_id: str):
-    history = memory.get_history(session_id)
-    return {"session_id": session_id, "messages": history}
-
 # ── Terminal ───────────────────────────────────────────────────────────────
 @app.post("/api/terminal")
 async def terminal(request: TerminalRequest):
     import subprocess
     try:
-        result = subprocess.run(request.command, shell=True, capture_output=True, text=True, timeout=30)
-        output = result.stdout or result.stderr or "✅ Command executed (no output)"
-        return {"output": output.strip()}
+        result = subprocess.run(
+            request.command, shell=True, capture_output=True, text=True, timeout=30
+        )
+        return {"output": result.stdout + result.stderr}
     except subprocess.TimeoutExpired:
-        return {"output": "⏱️ Command timed out after 30s"}
+        return {"output": "Command timed out (30s limit)"}
     except Exception as e:
         return {"error": str(e)}
 
 # ── Files ──────────────────────────────────────────────────────────────────
 @app.get("/api/files")
 async def list_files():
-    import os
+    import pathlib
     files = []
-    root = os.path.dirname(os.path.abspath(__file__))
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith('.') and d != 'node_modules' and d != '__pycache__']
-        rel_path = os.path.relpath(dirpath, root)
-        for f in filenames:
-            if f.startswith('.'):
+    try:
+        for p in pathlib.Path(".").rglob("*"):
+            if any(part.startswith(".") or part == "node_modules" or part == "__pycache__"
+                   for part in p.parts):
                 continue
-            full = os.path.join(rel_path, f)
-            try:
-                size = os.path.getsize(os.path.join(dirpath, f))
-                files.append({"path": full, "size": size})
-            except:
-                pass
-    return {"files": sorted(files)}
+            files.append({
+                "name": p.name,
+                "path": str(p),
+                "type": "folder" if p.is_dir() else "file",
+                "size": p.stat().st_size if p.is_file() else None,
+            })
+    except Exception:
+        pass
+    return {"files": files}
 
 # ── Git ────────────────────────────────────────────────────────────────────
 @app.get("/api/git/status")
 async def git_status():
     import subprocess
     try:
-        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=5).stdout.strip()
-        return {"branch": branch, "staged": [], "unstaged": [], "ahead": 0, "behind": 0}
-    except:
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip().splitlines()
+        unstaged = subprocess.run(
+            ["git", "diff", "--name-only"],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip().splitlines()
+        ahead_behind = subprocess.run(
+            ["git", "rev-list", "--count", "--left-right", "@{upstream}...HEAD"],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip().split()
+        behind = int(ahead_behind[0]) if len(ahead_behind) > 1 else 0
+        ahead  = int(ahead_behind[1]) if len(ahead_behind) > 1 else 0
+        return {"branch": branch, "staged": staged, "unstaged": unstaged, "ahead": ahead, "behind": behind}
+    except Exception:
         return {"branch": "main", "staged": [], "unstaged": [], "ahead": 0, "behind": 0}
 
 @app.post("/api/git/commit")
@@ -358,7 +394,10 @@ async def git_commit(request: GitCommitRequest):
     import subprocess
     try:
         subprocess.run(["git", "add", "."], check=True, timeout=10)
-        result = subprocess.run(["git", "commit", "-m", request.message], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(
+            ["git", "commit", "-m", request.message],
+            capture_output=True, text=True, timeout=10,
+        )
         if result.returncode == 0:
             return {"message": f"✅ Committed: {result.stdout.strip()}"}
         else:
@@ -375,24 +414,32 @@ async def health():
         "local_model": LOCAL_MODEL,
         "hf_token": bool(HF_TOKEN),
         "memory_enabled": True,
+        "version": "5.0.0",
     }
 
-# ── Frontend ───────────────────────────────────────────────────────────────
+# ── Frontend (SPA) ─────────────────────────────────────────────────────────
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
-@app.get("/")
-async def serve_index():
+# Serve built assets (JS/CSS chunks, images, etc.)
+if os.path.isdir(os.path.join(FRONTEND_DIST, "assets")):
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+
+@app.get("/favicon.svg", include_in_schema=False)
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    for name in ("favicon.svg", "favicon.ico"):
+        p = os.path.join(FRONTEND_DIST, name)
+        if os.path.exists(p):
+            return FileResponse(p)
+    return JSONResponse({}, status_code=404)
+
+# SPA catch-all: every non-API route returns index.html so React Router works
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
     index_path = os.path.join(FRONTEND_DIST, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return JSONResponse({"message": "CodeCraft API — Frontend not built"})
-
-@app.get("/assets/{path:path}")
-async def serve_assets(path: str):
-    file_path = os.path.join(FRONTEND_DIST, "assets", path)
-    if os.path.exists(file_path):
-        return FileResponse(file_path)
-    return JSONResponse({"error": "Not found"}, status_code=404)
+    return JSONResponse({"message": "CodeCraft API — Frontend not built yet"}, status_code=503)
 
 # ── Entry ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
