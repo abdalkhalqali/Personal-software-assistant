@@ -108,6 +108,54 @@ export async function sendMessage(
   }
 }
 
+// ── API Key Management ────────────────────────────────────────────────────
+
+export async function fetchApiKeys(): Promise<any> {
+  try {
+    const response = await fetch(`${API_BASE}/keys`)
+    return await response.json()
+  } catch {
+    return {}
+  }
+}
+
+export async function addApiKey(provider: string, key: string, label?: string): Promise<any> {
+  try {
+    const response = await fetch(`${API_BASE}/keys`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, key, label: label || '' }),
+    })
+    return await response.json()
+  } catch (err: any) {
+    return { status: 'error', message: err.message }
+  }
+}
+
+export async function deleteApiKey(provider: string, keyId: string): Promise<any> {
+  try {
+    const response = await fetch(`${API_BASE}/keys/${provider}/${keyId}`, {
+      method: 'DELETE',
+    })
+    return await response.json()
+  } catch (err: any) {
+    return { status: 'error', message: err.message }
+  }
+}
+
+export async function testApiKey(provider: string, key: string): Promise<any> {
+  try {
+    const response = await fetch(`${API_BASE}/keys/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, key }),
+    })
+    return await response.json()
+  } catch (err: any) {
+    return { status: 'error', message: err.message }
+  }
+}
+
 export async function executeCommand(command: string): Promise<string> {
   try {
     const response = await fetch(`${API_BASE}/terminal`, {

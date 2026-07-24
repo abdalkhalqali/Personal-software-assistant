@@ -80,6 +80,12 @@ interface AppState {
   gitStatus: GitStatus
   setGitStatus: (status: GitStatus) => void
 
+  // API Keys
+  apiKeys: Record<string, {id:string;key:string;label:string;active:boolean}[]>
+  setApiKeys: (keys: Record<string, any[]>) => void
+  addApiKey: (provider: string, keyData: any) => void
+  removeApiKey: (provider: string, keyId: string) => void
+
   // Model settings
   temperature: number
   setTemperature: (temp: number) => void
@@ -160,6 +166,22 @@ export const useAppStore = create<AppState>((set) => ({
   // Git
   gitStatus: { branch: 'main', staged: [], unstaged: [], ahead: 0, behind: 0 },
   setGitStatus: (status) => set({ gitStatus: status }),
+
+  // API Keys
+  apiKeys: {},
+  setApiKeys: (keys) => set({ apiKeys: keys }),
+  addApiKey: (provider, keyData) => set((s) => ({
+    apiKeys: {
+      ...s.apiKeys,
+      [provider]: [...(s.apiKeys[provider] || []), keyData],
+    },
+  })),
+  removeApiKey: (provider, keyId) => set((s) => ({
+    apiKeys: {
+      ...s.apiKeys,
+      [provider]: (s.apiKeys[provider] || []).filter((k) => k.id !== keyId),
+    },
+  })),
 
   // Model settings
   temperature: 0.7,
